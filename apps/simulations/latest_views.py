@@ -1,117 +1,11 @@
 """
 full_calculate_corrected_v7.py
-==============================
-Complete corrected ManuPlan engine — all bugs fixed vs legacy C++ (dll2).
-
-CRITICAL FIXES:
-  LVISIT   Visit probability per operation computed from routing via balance
-           equations (handles inspection/rework feedback loops). Previously
-           assumed lvisit=1 for all ops, causing massive over-utilisation.
-  BUG-15   Equipment avail_time removed (1-unavail/100) from denominator.
-           Legacy adds unavail as a separate term to total_util.
-  BUG-17   IBOM demand propagation now multiplies by (1+parent_scrap).
-  BUG-10   T_BATCH_PIECE now returns esetup+esetbatch+esetpiece (full legacy).
-  BUG-11   w_labor computed as flowtime residual, not direct approximation.
-
-LATENT FIXES (dormant for zero-OT, lsize=1, tbatch=-1):
-  BUG-4    Removed OT factor from _labor_times_no_OT (net cancels in set_xbar_cs).
-  BUG-5    xbar1/xbar2 re-scales xbarrl*=MAX(1,lsize) before summing.
-  BUG-16   MCT xprime uses T_BATCH_TOTAL modes, not LABOR_T/EQUIP_T.
-
-RETAINED v1/v2 FIXES:
-  BUG-3    xlabor uses plain absrate (not effabs).
-  BUG-1    Pre-lextra uwait additive with lextra increment.
-  BUG-2    f_lot_wait_mct uses xtrans*lsize/lotsiz ratio and vpergood.
-
-v4 FIXES — Equipment-pass uwait accumulation (calc1.cpp lines 285-311):
-  BUG-UWAIT-1  vlam1 now multiplied by min(1, lsize) matching calc1.cpp line 286
-               "v1 *= MIN(1.0, toper->lsize)".  Previously lsize was omitted,
-               under-estimating uwait by factor lsize for lsize > 1 ops.
-  BUG-UWAIT-2  xbar2 (equipment) now per-lot: xs_e + xr_e * MAX(1, lsize).
-               Previously used xs_e + xr_e (per-piece), under-estimating xbar2.
-               Matches calc1.cpp lines 294-297 "xbarr *= MAX(1, lsize); xbar2 = xbars+xbarr".
-  BUG-UWAIT-3  xbar1 (labor) now per-lot + OT-restored:
-               (xs_l + xr_l * MAX(1,lsize)) * lab_ot_fac.
-               Previously used xs_l + xr_l (per-piece, OT-divided), under-
-               estimating xbar1. Matches calc1.cpp lines 285-288
-               "xbarrl *= MAX(1,lsize); xbar1 = (xbarsl+xbarrl)*(1+facovt/100)".
-
-v5 FIX — THE ROOT CAUSE of waitLaborUtil always showing 0:
-  BUG-UWAIT-4  equip_uwait_pre was divided by avail (= num * OT * ops_per_period)
-               in the FIX-E block. This is WRONG.
-
-               total_uwait = sum(vlam1 * x1_uw) is already DIMENSIONLESS because
-               vlam1 = lots/minute and x1_uw = minutes/lot. The legacy (calc1.cpp
-               lines 397-399) scales this as:
-                 teq->uwait *= effabs / (1 - effabs);
-                 teq->uwait /= teq->num;
-               i.e. divides only by num (the machine count), NOT by avail.
-
-               Dividing by avail (~2400+ minutes) made equip_uwait_pre ~2400x too
-               small, effectively zero, so waitLaborUtil always showed 0.0 and
-               the BUG-11 residual dumped all that missing wait into w_labor.
-
-               Fix: equip_uwait_pre[eid] = raw * ea/(1-ea) / cnt  (no /avail).
-
-v6 FIXES — Three more bugs discovered by full legacy audit:
-
-  BUG-GGC     _ggc_wait was a completely different approximation from the
-               legacy ggc() function in calc8.cpp. The legacy uses:
-               - Complex gamma/phi1/phi2/phi3/phi4 formula for xi
-                 vs Python's simple (1-rho)^... approximation
-               - phi formula using phi1 (ca>=cs) and phi3 (ca<cs) factors
-                 vs Python's simplified versions
-               - cw_sq in ct2: SQRT(cs2*xbar^2 + cw_sq*wait^2)/(xbar+wait)
-                 vs Python which omitted cw_sq entirely
-               - Uses (int)m truncation not round() for Erlang-C
-               - Uses orig_num_av in meanwait_m denominator even when num
-                 is bumped to 1 for num_av < 1 case
-               This function is the heart of labour wait — all scenarios
-               with non-trivial labor utilisation were wrong.
-               Fix: Complete rewrite matching calc8.cpp ggc() exactly.
-
-  BUG-XB1-CS  _compute_xbar_cs used _labor_no_OT (returns xs_raw) then
-               multiplied by lab_ot_fac → xbar1 = (xs_raw+xr_raw)*lab_ot_fac.
-               Legacy calc2.cpp: uses calc_op(LABOR_T) (divides by OT) then
-               multiplies back by (1+lab_ot) → net = xs_raw + xr_raw.
-               The extra lab_ot_fac inflated xbarbar_eq, cs2_eq, smbard.
-               Fix: Use _eq_LABOR_T (which divides by OT) so that the
-               * lab_ot_fac cancels correctly: xbar1 = xs_raw + xr_raw.
-
-  BUG-XB1-MCT MCT product loop had xbar1 = (xs_tl+xr_tl)*lab_ot_f.
-               Legacy calc1.cpp MCT section: xbar1 = xbarsl_t + xbarrl_t
-               (T_BATCH_TOTAL_LABOR returns OT-divided values and they are
-               NOT multiplied back — unlike the uwait pass xbar1).
-               The extra * lab_ot_f inflated flowtime when labor OT > 0.
-               Fix: xbar1 = xs_tl + xr_tl (drop * lab_ot_f).
-
-v7 FIXES — Util fraction denominator had extra (1+OT) factor in BOTH passes:
-  BUG-AVAIL-EQ   Equipment setup_frac/run_frac computed as total_minutes /
-                 (num*(1+OT)*ops_per_period). Legacy normalises dimensionless
-                 uset += v1*xs by just /= teq->num (no OT). The xs returned by
-                 calc_op(EQUIP_T) is already OT-divided, so dividing again by
-                 (1+OT) in the denominator double-counts it. All scenarios with
-                 equipment overtime_pct > 0 had setup/run util too low by 1/(1+OT).
-                 Fix: avail_time = num * ops_per_period (remove OT from denom).
-
-  BUG-AVAIL-LAB  Same bug on the labor side. avail_lab = num*(1+OT)*ops_per_period
-                 but legacy does tlabor->uset /= tlabor->num_av where num_av starts
-                 as plain num. xs_l is already OT-divided, so same double-counting.
-                 All scenarios with labor overtime_pct > 0 had labor util too low by
-                 1/(1+OT), which cascaded into effabs, uwait, _ggc_wait, fac_eq_lab.
-                 Fix: avail_lab = num * ops_per_period (remove OT from denom).
-
-NEW OUTPUT FIELDS:
-  Equipment: wip_process, wip_queue, wip_total, wait_min, num_av, visits_per_100
-  Labor:     wip_total, wip_process, wip_queue, eq_cover, fac_eq_lab
-  Product:   w_equip, w_labor, w_setup, w_run, w_lot, wip_lots
-  Operation: ueset, uerun, ulset, ulrun, flowtime, n_setups, qpoper,
-             w_run, w_setup, w_lot, w_equip, w_labor
 """
 
 from __future__ import annotations
 import math
 import json
+import logging
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -119,6 +13,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
+
+logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants and tiny helpers
@@ -239,7 +135,6 @@ def f_ops_per_period(conv1: float, conv2: float) -> float:
 def f_lot_size(lot_size: float, lot_factor: float) -> float:
     return max(1.0, float(lot_size) * float(lot_factor))
 
-
 def f_tbatch_size(tbatch_size: float, lot_size_val: float) -> float:
     tb = float(tbatch_size)
     return float(lot_size_val) if tb <= 0 else max(1.0, tb)
@@ -248,10 +143,11 @@ def f_tbatch_size(tbatch_size: float, lot_size_val: float) -> float:
 def f_num_tbatches(lot_size_val: float, tbatch_size_val: float) -> float:
     return float(lot_size_val) / float(tbatch_size_val) if tbatch_size_val > 0 else 1.0
 
-
 def f_assign_fraction(pct_assigned: float) -> float:
     return float(pct_assigned) / 100.0
 
+def f_avail_equip(count: float, overtime_pct: float, ops_per_period: float) -> float:
+    return float(count) * (1.0 + float(overtime_pct) / 100.0) * float(ops_per_period)
 
 def f_num_lots(demand: float, lot_size_val: float, assign_fraction: float) -> float:
     return (float(demand) / float(lot_size_val)) * float(assign_fraction)
@@ -938,6 +834,82 @@ def full_calculate_corrected(model, scenario=None):
     equip_uwait_raw: Dict[str, float] = {}  # raw sum(v1*x1) before scaling
     eq_qp_raw:       Dict[str, float] = {}  # raw sum(v1*xbar2) = uset_raw+urun_raw per equipment  # raw sum(v1*x1) before scaling
 
+    # Accumulators: raw weighted sums (NOT yet /num_av)
+    eq_raw_uset: Dict[str, float] = {}  # Σ v1*xbars
+    eq_raw_urun: Dict[str, float] = {}  # Σ v1*xbarr_lot
+    eq_raw_uwait: Dict[str, float] = {} # Σ v1*x1_uw  (before effabs scaling)
+
+    for eq in equipment_list:
+        eq_id = eq.get("id", "")
+        eq_raw_uset[eq_id]  = 0.0
+        eq_raw_urun[eq_id]  = 0.0
+        eq_raw_uwait[eq_id] = 0.0
+
+    # Labor raw accumulator maps
+    lab_raw_uset: Dict[str, float] = {}  # Σ v1*xbarsl
+    lab_raw_urun: Dict[str, float] = {}  # Σ v1*xbarrl_lot
+
+    for op in operations_list:
+        eq = next((e for e in equipment_list if e.get("id") == op.get("equip_id")), None)
+        if not eq:
+            continue
+        product = next((p for p in products_list if p.get("id") == op.get("product_id")), None)
+        if not product:
+            continue
+
+        pid        = product.get("id", "")
+        demand_i   = effective_demand.get(pid, 0.0) * (1.0 + scrap_rates.get(pid, 0.0))
+        if demand_i <= 0:
+            continue
+
+        eq_id      = eq.get("id", "")
+        is_delay   = eq.get("equip_type") == "delay"
+        lid        = eq.get("labor_group_id") or ""
+        lab        = labor_by_id.get(lid)
+        lab_ot_pct = float(lab.get("overtime_pct", 0) if lab else 0)
+
+        lot_size_v = f_lot_size(product.get("lot_size", 1), product.get("lot_factor", 1))
+        tbatch_v   = f_tbatch_size(product.get("tbatch_size", -1), lot_size_v)
+        nb         = f_num_tbatches(lot_size_v, tbatch_v)
+        af         = f_assign_fraction(op.get("pct_assigned", 0))
+        if af <= 0:
+            continue
+        ps_factor  = float(product.get("setup_factor", 1))
+        lsize      = float(op.get("lsize", lot_size_v))
+        vp         = visit_probs_all.get(pid, {}).get(op.get("op_name", ""), 1.0)
+
+        dlam  = demand_i / (lot_size_v * max(ops_per_period, 1e-9))
+        v1    = dlam * af * vp * min(1.0, lsize)   # matches legacy: v1 *= MIN(1, lsize)
+
+        # Equip: xbarr already per-piece from EQUIP_T, scale to per-lot
+        xs_e, xr_e_pc = _eq_EQUIP_T(op, eq, lot_size_v, nb, ps_factor, lsize)
+        xbarr_lot_e   = xr_e_pc * max(1.0, lsize)
+
+        # Labor: xbarrl per-piece from LABOR_T, scale to per-lot
+        xs_l, xr_l_pc = _eq_LABOR_T(op, eq, lab, lot_size_v, nb, ps_factor, lsize)
+        xbarrl_lot_l  = xr_l_pc * max(1.0, lsize)
+
+        # BUG-G FIX: xbar1 for uwait = raw labor = (xs_l_/OT + xr_l_lot_/OT) * (1+OT)
+        #   = xs_l * (1+OT) and xbarrl_lot_l * (1+OT) — but LABOR_T already divided
+        #   by lab_OT, so: xs_l*(1+OT/100) = xs_raw (OT cancels).
+        #   Numerically: xbar1_uw = (xs_l + xbarrl_lot_l) * (1 + lab_ot_pct/100)
+        xbar1_uw = (xs_l + xbarrl_lot_l) * (1.0 + lab_ot_pct / 100.0)
+
+        # BUG-H FIX: xbar2 for uwait must be per-lot equip time
+        xbar2_uw = xs_e + xbarr_lot_e
+
+        x1_uw = min(xbar1_uw, xbar2_uw) if xbar2_uw > SSEPSILON else xbar1_uw
+
+        if not is_delay:
+            eq_raw_uset[eq_id]  += v1 * xs_e
+            eq_raw_urun[eq_id]  += v1 * xbarr_lot_e
+            eq_raw_uwait[eq_id] += v1 * x1_uw
+
+        # Labor accumulators (calc1.cpp lines 301-302)
+        lab_raw_uset[lid] = lab_raw_uset.get(lid, 0.0) + v1 * xs_l
+        lab_raw_urun[lid] = lab_raw_urun.get(lid, 0.0) + v1 * xbarrl_lot_l
+
+    # ── Normalise equip util and build equip_rows ──────────────────────────
     for eq in equipment_list:
         eq_id    = eq.get("id", "")
         eq_name  = eq.get("name", "")
@@ -1508,4 +1480,8 @@ def full_calculate_view(request):
         results = full_calculate_corrected(model, scenario)
         return JsonResponse({"results": results})
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        logger.exception("full_calculate failed")
+        return JsonResponse(
+            {"error": str(e), "errorType": type(e).__name__},
+            status=500,
+        )
