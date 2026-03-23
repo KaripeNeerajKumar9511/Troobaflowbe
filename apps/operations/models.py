@@ -48,13 +48,13 @@ class Operation(models.Model):
 
     percent_assign = models.FloatField(default=100)
 
-    equipment_setup_per_lot = models.IntegerField(default=0)
+    equipment_setup_per_lot = models.FloatField(default=0)
 
-    equipment_run_per_piece = models.IntegerField(default=0)
+    equipment_run_per_piece = models.FloatField(default=0)
 
-    labor_setup_per_lot = models.IntegerField(default=0)
+    labor_setup_per_lot = models.FloatField(default=0)
 
-    labor_run_per_piece = models.IntegerField(default=0)
+    labor_run_per_piece = models.FloatField(default=0)
 
     FORMULA_CHOICES = [
         ("E_SETUP_LOT", "E.Setup/Lot"),

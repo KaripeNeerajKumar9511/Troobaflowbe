@@ -1549,6 +1549,8 @@ def full_calculate_view(request):
         return JsonResponse({"error": "Missing 'model' in body"}, status=400)
 
     try:
+        print("model", model)
+        print("scenario", scenario)
         results = full_calculate_corrected(model, scenario)
         return JsonResponse({"results": results})
     except Exception as e:
