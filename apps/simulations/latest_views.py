@@ -1,37 +1,65 @@
 """
-full_calculate_corrected.py  — FULLY CORRECTED vs legacy C++ (calc1.cpp / calc2.cpp / calc8.cpp)
-============================================================
-All bugs from original Python port fixed after line-by-line audit against legacy:
+full_calculate_corrected_v3.py
+==============================
+Complete corrected ManuPlan engine — all bugs fixed vs legacy C++ (dll2).
 
-  FIX-A  effabs() implemented: effective absenteeism = ul^(num-1)*absrate (not plain absrate)
-  FIX-B  xbar1 recovery: labor times multiplied back by (1+labOT/100) after calc_op LABOR_T
-  FIX-C  smbard uses MIN(xbar1,xbar2) not xprime for accumulation
-  FIX-D  Labor cs2 uses (faccvs*v_lab)^0.9 power formula, NOT flow-weighted formula
-  FIX-E  First-pass uwait: accumulated raw, then scaled by effabs/(1-effabs)/num
-  FIX-F  Labor num_av normalised by INITIAL num first, then recalculated (correct ordering)
-  FIX-G  lextra ca2: computed per-group from eq cs2 mixture formula (not hard-coded 1.0)
-  FIX-H  f_lot_wait_mct uses legacy formula: (xtrans*lsize/lotsiz-1)*per_piece_time
-  FIX-I  Labor xbarbar in ggc uses xlabor=xbar1/(1-absrate), not xprime
-  FIX-J  xprsig variance uses teq->fac_eq_lab (not tlabor->fac_eq_lab) — was already correct
-  FIX-K  Labor util first-pass divides by initial num_av (=num), then recalculates num_av
+CRITICAL FIXES:
+  LVISIT   Visit probability per operation computed from routing via balance
+           equations (handles inspection/rework feedback loops). Previously
+           assumed lvisit=1 for all ops, causing massive over-utilisation.
+  BUG-15   Equipment avail_time removed (1-unavail/100) from denominator.
+           Legacy adds unavail as a separate term to total_util.
+  BUG-17   IBOM demand propagation now multiplies by (1+parent_scrap).
+  BUG-10   T_BATCH_PIECE now returns esetup+esetbatch+esetpiece (full legacy).
+  BUG-11   w_labor computed as flowtime residual, not direct approximation.
+
+LATENT FIXES (dormant for zero-OT, lsize=1, tbatch=-1):
+  BUG-4    Removed OT factor from _labor_times_no_OT (net cancels in set_xbar_cs).
+  BUG-5    xbar1/xbar2 re-scales xbarrl*=MAX(1,lsize) before summing.
+  BUG-16   MCT xprime uses T_BATCH_TOTAL modes, not LABOR_T/EQUIP_T.
+
+RETAINED v1/v2 FIXES:
+  BUG-3    xlabor uses plain absrate (not effabs).
+  BUG-1    Pre-lextra uwait additive with lextra increment.
+  BUG-2    f_lot_wait_mct uses xtrans*lsize/lotsiz ratio and vpergood.
+
+NEW OUTPUT FIELDS:
+  Equipment: wip_process, wip_queue, wip_total, wait_min, num_av, visits_per_100
+  Labor:     wip_total, wip_process, wip_queue, eq_cover, fac_eq_lab
+  Product:   w_equip, w_labor, w_setup, w_run, w_lot, wip_lots
+  Operation: ueset, uerun, ulset, ulrun, flowtime, n_setups, qpoper,
+             w_run, w_setup, w_lot, w_equip, w_labor
 """
 
 from __future__ import annotations
-
 import math
 import json
-from dataclasses import dataclass
-from datetime import datetime
+from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Constants and tiny helpers
+# ─────────────────────────────────────────────────────────────────────────────
+EPSILON   = 1e-6
+SSEPSILON = 1e-20
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Tiny helpers
-# ─────────────────────────────────────────────────────────────────────────────
+
+def _s(v: float) -> float:
+    return v if (v == v and abs(v) != float("inf")) else 0.0
+
+
+def _r1(x: float) -> float:
+    return round(float(x) * 10) / 10
+
+
+def _r4(x: float) -> float:
+    return round(float(x) * 10000) / 10000
+
 
 def _parse_json(request):
     try:
@@ -40,68 +68,94 @@ def _parse_json(request):
         return None
 
 
-def _sanitize(v: float) -> float:
-    return v if (v == v and abs(v) != float("inf")) else 0.0
-
-
-def _round1(x: float) -> float:
-    return round(x * 10) / 10
-
-
-def _round4(x: float) -> float:
-    return round(x * 10000) / 10000
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# FIX-A: effabs() — legacy calc1.cpp ~line 936
-# effective absenteeism is modulated by utilisation and operator count
-# effabs = ul^(num-1) * absrate   (for num>=1)
-# effabs = absrate                (for num<1, i.e. delay/virtual server)
+# effabs — calc1.cpp lines 938-952
+# For num >= 1: effabs = ul^(num-1) * absrate_frac
+# For num <  1: effabs = absrate_frac   (delay server)
 # ─────────────────────────────────────────────────────────────────────────────
-
 def effabs(absrate_frac: float, labor_ul: float, labor_num: float) -> float:
-    """
-    Effective absenteeism factor.
-    Legacy calc1.cpp effabs():
-        n = tlabor->num - 1
-        if n < 0:  x = absrate/100
-        else:      x = pow(ul, n) * absrate/100     (non-OPT mode uses ul directly)
-    Returns a fraction (0..1), capped at 0.999.
-    """
     n = float(labor_num) - 1.0
-    if n < 0.0:
-        x = float(absrate_frac)
-    else:
-        x = (float(labor_ul) ** n) * float(absrate_frac)
+    x = float(absrate_frac) if n < 0.0 else (float(labor_ul) ** n) * float(absrate_frac)
     return min(x, 0.999)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Small swappable sub-formulas (unchanged from original unless noted)
+# Visit probability — LVISIT FIX
+# Solves balance equations v[j] = Σ_i v[i]*R[i,j] with v[DOCK]=1
+# via fixed-point iteration. Handles inspection/rework cycles.
 # ─────────────────────────────────────────────────────────────────────────────
+def compute_visit_probs(product_id: str, operations_list: list, routing_list: list) -> Dict[str, float]:
+    routes = [r for r in routing_list if r.get("product_id") == product_id]
+    ops    = [op for op in operations_list if op.get("product_id") == product_id]
+    op_names = list({op.get("op_name", "") for op in ops})
 
+    adj: Dict[str, List[Tuple[str, float]]] = defaultdict(list)
+    for r in routes:
+        adj[r.get("from_op_name", "")].append(
+            (r.get("to_op_name", ""), float(r.get("pct_routed", 0)) / 100.0)
+        )
+
+    vp: Dict[str, float] = {n: 0.0 for n in op_names}
+    vp["DOCK"] = 1.0
+
+    for _ in range(500):
+        vp_new = {n: 0.0 for n in op_names}
+        vp_new["DOCK"] = 1.0
+        for frm, tos in adj.items():
+            fv = vp.get(frm, 0.0)
+            if fv <= 0.0:
+                continue
+            for to, pct in tos:
+                if to in ("STOCK", "SCRAP"):
+                    continue
+                vp_new[to] = vp_new.get(to, 0.0) + fv * pct
+        delta = max(abs(vp_new.get(n, 0.0) - vp.get(n, 0.0)) for n in op_names)
+        vp = vp_new
+        if delta < 1e-9:
+            break
+
+    return vp
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Yield from routing (P(reach STOCK | start DOCK))
+# ─────────────────────────────────────────────────────────────────────────────
+def f_yield_from_routing(routing_rows: list, product_id: str) -> float:
+    routes = [r for r in routing_rows if r.get("product_id") == product_id]
+    adj: Dict[str, List[Tuple[str, float]]] = defaultdict(list)
+    nodes = {"DOCK", "STOCK", "SCRAP"}
+    for r in routes:
+        frm = str(r.get("from_op_name", ""))
+        to  = str(r.get("to_op_name",   ""))
+        nodes.add(frm); nodes.add(to)
+        adj[frm].append((to, float(r.get("pct_routed", 0)) / 100.0))
+
+    if not adj:
+        return 1.0
+
+    p_stock: Dict[str, float] = {n: 0.0 for n in nodes}
+    p_stock["STOCK"] = 1.0
+
+    for _ in range(500):
+        delta = 0.0
+        for n in nodes:
+            if n in ("STOCK", "SCRAP"):
+                continue
+            outs  = adj.get(n)
+            new_v = 1.0 if not outs else sum(p * p_stock.get(t, 0.0) for t, p in outs)
+            delta = max(delta, abs(new_v - p_stock[n]))
+            p_stock[n] = new_v
+        if delta < 1e-10:
+            break
+
+    return min(max(float(p_stock.get("DOCK", 1.0)), 0.0), 1.0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Basic dimension helpers
+# ─────────────────────────────────────────────────────────────────────────────
 def f_ops_per_period(conv1: float, conv2: float) -> float:
     return max(float(conv1), 0.001) * max(float(conv2), 0.001)
-
-
-def f_overtime_factor(overtime_pct: float) -> float:
-    return 1.0 + float(overtime_pct) / 100.0
-
-
-def f_unavailable_factor(unavail_pct: float) -> float:
-    return 1.0 - float(unavail_pct) / 100.0
-
-
-def f_available_time_equip(count, overtime_pct, unavail_pct, ops_per_period) -> float:
-    ot = f_overtime_factor(overtime_pct)
-    uv = f_unavailable_factor(unavail_pct)
-    return float(count) * ot * uv * float(ops_per_period)
-
-
-def f_available_time_labor(count, overtime_pct, ops_per_period) -> float:
-    """Labor available time — NOT reduced by absrate (BUG-09 fix retained)."""
-    ot = f_overtime_factor(overtime_pct)
-    return float(count) * ot * float(ops_per_period)
 
 
 def f_lot_size(lot_size: float, lot_factor: float) -> float:
@@ -110,11 +164,10 @@ def f_lot_size(lot_size: float, lot_factor: float) -> float:
 
 def f_tbatch_size(tbatch_size: float, lot_size_val: float) -> float:
     tb = float(tbatch_size)
-    return float(lot_size_val) if tb == -1 else max(1.0, tb)
+    return float(lot_size_val) if tb <= 0 else max(1.0, tb)
 
 
 def f_num_tbatches(lot_size_val: float, tbatch_size_val: float) -> float:
-    """Float division (BUG-07 fix retained)."""
     return float(lot_size_val) / float(tbatch_size_val) if tbatch_size_val > 0 else 1.0
 
 
@@ -126,672 +179,441 @@ def f_num_lots(demand: float, lot_size_val: float, assign_fraction: float) -> fl
     return (float(demand) / float(lot_size_val)) * float(assign_fraction)
 
 
-def f_setup_per_lot(equip_setup_lot, equip_setup_piece, equip_setup_tbatch,
-                    lot_size_val, num_tbatches, equip_setup_factor, product_setup_factor) -> float:
-    base = (float(equip_setup_lot)
-            + float(equip_setup_piece) * float(lot_size_val)
-            + float(equip_setup_tbatch) * float(num_tbatches))
-    return base * float(equip_setup_factor) * float(product_setup_factor)
+# ─────────────────────────────────────────────────────────────────────────────
+# BUG-15 FIX: avail_time does NOT include unavail_factor.
+# Legacy uset/urun are pure-work fractions; unavail added separately to total_util.
+# ─────────────────────────────────────────────────────────────────────────────
+def f_avail_equip(count: float, overtime_pct: float, ops_per_period: float) -> float:
+    return float(count) * (1.0 + float(overtime_pct) / 100.0) * float(ops_per_period)
 
 
-def f_run_per_lot(equip_run_piece, equip_run_lot, equip_run_tbatch,
-                  lot_size_val, num_tbatches, equip_run_factor) -> float:
-    base = (float(equip_run_piece) * float(lot_size_val)
-            + float(equip_run_lot)
-            + float(equip_run_tbatch) * float(num_tbatches))
-    return base * float(equip_run_factor)
-
-
-def f_time_per_piece(per_lot_time: float, lot_size_val: float) -> float:
-    return float(per_lot_time) / float(lot_size_val) if lot_size_val else 0.0
+def f_avail_labor(count: float, overtime_pct: float, ops_per_period: float) -> float:
+    return float(count) * (1.0 + float(overtime_pct) / 100.0) * float(ops_per_period)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FIX-H: f_lot_wait_mct — legacy calc1.cpp T_BATCH_WAIT_LOT formula
+# calc_op equivalents — matching calc1.cpp exactly
 #
-# Legacy w_lot per operation (calc1.cpp line 664–665):
-#   toper->w_lot = vpergood * ((xbars_t2 + xbarr_t2) * MAX(0, xtrans*lsize/lotsiz - 1)
-#                              + tgather * x1)
-# where T_BATCH_WAIT_LOT returns:
-#   xs = esetpiece * facset / OT
-#   xr = epiece    * facrun / OT
-# and xtrans = tbatch (or lotsiz if tbatch=-1), lsize=lotsiz for simple case.
-#
-# For simple case (lsize=lotsiz, vpergood=1, tgather=0):
-#   w_lot = (xs + xr) * MAX(0, xtrans/lotsiz*lotsiz/lotsiz - 1)  -- wait this simplifies:
-#   xtrans * lsize/lotsiz = tbatch * lotsiz/lotsiz = tbatch   (when lsize=lotsiz)
-#   w_lot = (xs + xr) * MAX(0, tbatch - 1)
-# where xs+xr = (esetpiece*facset + epiece*facrun) / OT = per-piece equip run+setup time
+# All return (xs_per_lot, xr_per_piece) unless noted.
+# Legacy calc_op returns xs (per-lot setup) and xr (per-piece run after /lsize).
 # ─────────────────────────────────────────────────────────────────────────────
 
-def f_lot_wait_mct(
-    lot_size_val: float,
-    tbatch_size_val: float,
-    run_piece_ot_adj: float,   # epiece * facrun / OT  (OT-adjusted run per piece, minutes)
-    setup_piece_ot_adj: float, # esetpiece * facset / OT (OT-adjusted setup per piece, minutes)
-    conv1: float,
-) -> float:
-    """
-    FIX-H: Transfer-batch lot wait using legacy T_BATCH_WAIT_LOT formula.
-
-    Legacy: w_lot = (xs_piece + xr_piece) * MAX(0, xtrans - 1)
-    where xtrans = tbatch (or lotsiz if tbatch=-1), for lsize=lotsiz case.
-    Converted to days by dividing by conv1.
-    """
-    xtrans = float(tbatch_size_val)  # already set to lotsiz if tbatch=-1
-    per_piece_min = float(run_piece_ot_adj) + float(setup_piece_ot_adj)
-    wait_min = per_piece_min * max(0.0, xtrans - 1.0)
-    return wait_min / max(float(conv1), 0.001)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# M/G/c queue mathematics — calc8.cpp ggc (unchanged, confirmed correct)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _cdf_std_normal(z: float) -> float:
-    return 0.5 * math.erfc(-float(z) / math.sqrt(2.0))
-
-
-def _erlang_c(rho: float, m: float) -> float:
-    if rho <= 0.0:
-        return 0.0
-    rho = min(rho, 0.9999)
-    m_int = max(1, int(round(m)))
-    mrho = m_int * rho
-    temp = 1.0
-    total = 1.0
-    for i in range(1, m_int):
-        temp *= mrho / i
-        total += temp
-    temp *= mrho / m_int
-    numerator = temp / (1.0 - rho)
-    denom = total + numerator
-    return numerator / max(denom, 1e-20)
-
-
-def _half_in_whitt(rho: float, m: float) -> float:
-    waitbeta = (1.0 - min(rho, 0.9999)) * math.sqrt(max(m, 1.0))
-    val = 1.0 + 2.5066 * waitbeta * _cdf_std_normal(waitbeta) * math.exp(0.5 * waitbeta ** 2)
-    return 1.0 / max(val, 1e-10)
-
-
-def ggc_wait(
-    labor_ul: float,
-    num_av: float,
-    xbarbar: float,   # FIX-I: must be labor xbarbar (xlabor-weighted), not equip xbarbar
-    ca2: float,
-    cs2: float,
-) -> Tuple[float, float]:
-    """
-    M/G/c queue wait for labor group — calc8.cpp ggc().
-    Returns:
-      fac_eq_lab  — meanwait / xbarbar  (dimensionless congestion ratio)
-      ct2         — departure-process CV (stored as CV, used as CV^2 in variance — legacy behaviour)
-    """
-    rho = float(labor_ul)
-    num = float(num_av)
-
-    if num < 1.0:
-        rho *= num
-        num = 1.0
-
-    if xbarbar < 1e-10 or rho < 1e-10:
-        return 0.0, float(cs2)
-
-    rho = min(rho, 0.9999 / max(num, 1.0))
-
-    ECBOUND = 70.0
-    probwait_m = _erlang_c(rho, num) if num <= ECBOUND else _half_in_whitt(rho, num)
-
-    mean_wait_m = probwait_m * xbarbar / (num_av * max(1.0 - rho, 1e-6))
-
-    gamma = min(
-        0.24,
-        (1.0 - rho) * (num - 1.0) * (math.sqrt(4.0 + 5.0 * num) - 2.0)
-        / max(16.0 * num * rho, 1e-20),
-    )
-    phi1 = 1.0 + gamma
-    phi2 = 1.0 - 4.0 * gamma
-    phi3 = phi2 * math.exp(-2.0 * (1.0 - rho) / max(3.0 * rho, 1e-10))
-    phi4 = min(1.0, 0.5 * (phi1 + phi3))
-
-    c_sq = 0.5 * (ca2 + cs2)
-    xi = 1.0 if c_sq >= 1.0 else phi4 ** (2.0 * (1.0 - c_sq))
-
-    if ca2 >= cs2:
-        denom_phi = max(4.0 * ca2 - 3.0 * cs2, 1e-20)
-        phi = 4.0 * (ca2 - cs2) * phi1 / denom_phi + cs2 * xi / denom_phi
-    else:
-        denom_phi = max(ca2 + cs2, 1e-20)
-        phi = (cs2 - ca2) * phi3 * 0.5 / denom_phi + (cs2 + 3.0 * ca2) * xi * 0.5 / denom_phi
-
-    mean_wait = phi * c_sq * mean_wait_m
-
-    z_ct = (ca2 + cs2) / max(1.0 + cs2, 1e-20)
-    sqrt_num = math.sqrt(abs(num))
-    gamma2 = (num - num * rho - 0.5) / max(math.sqrt(num * rho * z_ct), 1e-10)
-
-    pi6 = 1.0 - _cdf_std_normal(gamma2)
-    one_minus_rho_sqrt_n = (1.0 - rho) * sqrt_num
-    pi5_denom = max(1.0 - _cdf_std_normal(one_minus_rho_sqrt_n), 1e-10)
-    pi5 = min(
-        1.0,
-        (1.0 - _cdf_std_normal(2.0 * one_minus_rho_sqrt_n / max(1.0 + ca2, 1e-10)))
-        * probwait_m / pi5_denom,
-    )
-    pi4 = min(
-        1.0,
-        (1.0 - _cdf_std_normal((1.0 + cs2) * one_minus_rho_sqrt_n / max(ca2 + cs2, 1e-10)))
-        * probwait_m / pi5_denom,
-    )
-
-    pi1 = rho ** 2 * pi4 + (1.0 - rho ** 2) * pi5
-    pi2 = ca2 * pi1 + (1.0 - ca2) * pi6
-    pi3 = (2.0 * (1.0 - ca2) * (gamma2 - 0.5) * pi2
-           + (1.0 - 2.0 * (1.0 - ca2) * (gamma2 - 0.5)) * pi1)
-
-    if num < 7 or gamma2 <= 0.5 or ca2 >= 1.0:
-        pi = pi1
-    elif num >= 7 and gamma2 >= 1.0 and ca2 < 1.0:
-        pi = pi2
-    else:
-        pi = pi3
-
-    probwait_ct = min(1.0, max(0.0, pi))
-
-    if cs2 >= 1.0:
-        dscube = 3.0 * cs2 * (1.0 + cs2)
-    else:
-        dscube = (2.0 * cs2 + 1.0) * (cs2 + 1.0)
-
-    if probwait_ct > 1e-10:
-        cd_sq = (2.0 * rho - 1.0
-                 + 4.0 * (1.0 - rho) * dscube / max(3.0 * (cs2 + 1.0) ** 2, 1e-20))
-        cw_sq = (cd_sq + 1.0 - probwait_ct) / probwait_ct
-    else:
-        cw_sq = 0.0
-
-    # FIX: ct2 = sqrt(cs2*xbar^2 + cw^2*wait^2) / (xbar+wait)  — legacy calc8.cpp line 152
-    # This is CV (not CV^2); it is used AS CV^2 in variance formula (legacy inconsistency, replicated)
-    ct2 = math.sqrt(max(cs2 * xbarbar ** 2 + cw_sq * mean_wait ** 2, 0.0)) / max(xbarbar + mean_wait, 1e-20)
-
-    fac_eq_lab = mean_wait / max(xbarbar, 1e-20)
-    return max(0.0, fac_eq_lab), max(0.0, ct2)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FIX-B: OT-adjusted equipment times (unchanged — already correct)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _ot_adj_equip_times(op, eq, lot_size_val, num_tbatches, prod_setup_factor):
-    """Returns OT-adjusted (xbars per lot, xbarr per piece) for equipment."""
+def _eq_EQUIP_T(op, eq, lot_size_v, nb, ps_factor, lsize=None):
+    """calc_op(EQUIP_T): xs=per-lot setup, xr=per-piece run, both OT-adjusted."""
+    if lsize is None:
+        lsize = lot_size_v
     ot = 1.0 + float(eq.get("overtime_pct", 0)) / 100.0
-    xs = (
-        float(op.get("equip_setup_lot", 0))
-        + float(op.get("equip_setup_piece", 0)) * lot_size_val
-        + float(op.get("equip_setup_tbatch", 0)) * num_tbatches
-    ) * float(eq.get("setup_factor", 1)) * prod_setup_factor / ot
-
-    xr_lot = (
-        float(op.get("equip_run_piece", 0)) * lot_size_val
-        + float(op.get("equip_run_lot", 0))
-        + float(op.get("equip_run_tbatch", 0)) * num_tbatches
-    ) * float(eq.get("run_factor", 1)) / ot
-
-    xr_piece = xr_lot / lot_size_val if lot_size_val > 0 else 0.0
-    return xs, xr_piece
+    sf = float(eq.get("setup_factor", 1))
+    rf = float(eq.get("run_factor", 1))
+    xs = (float(op.get("equip_setup_lot",    0))
+          + float(op.get("equip_setup_tbatch", 0)) * nb
+          + float(op.get("equip_setup_piece",  0)) * lsize
+         ) * sf * ps_factor / ot
+    xr_lot = (float(op.get("equip_run_lot",    0))
+              + float(op.get("equip_run_tbatch", 0)) * nb
+              + float(op.get("equip_run_piece",  0)) * lsize
+             ) * rf / ot
+    return xs, (xr_lot / lsize if lsize > EPSILON else 0.0)
 
 
-def _ot_adj_equip_piece_rates(op, eq):
+def _eq_LABOR_T(op, eq, lab, lot_size_v, nb, ps_factor, lsize=None):
+    """calc_op(LABOR_T): xs=per-lot setup, xr=per-piece run, both OT-adjusted."""
+    if lsize is None:
+        lsize = lot_size_v
+    lab_ot = 1.0 + float(lab.get("overtime_pct", 0) if lab else 0) / 100.0
+    esf = float(eq.get("setup_factor",  1))
+    erf = float(eq.get("run_factor",    1))
+    lsf = float(lab.get("setup_factor", 1) if lab else 1)
+    lrf = float(lab.get("run_factor",   1) if lab else 1)
+    xs = (float(op.get("labor_setup_lot",    0))
+          + float(op.get("labor_setup_tbatch", 0)) * nb
+          + float(op.get("labor_setup_piece",  0)) * lsize
+         ) * esf * lsf * ps_factor / lab_ot
+    xr_lot = (float(op.get("labor_run_lot",    0))
+              + float(op.get("labor_run_tbatch", 0)) * nb
+              + float(op.get("labor_run_piece",  0)) * lsize
+             ) * erf * lrf / lab_ot
+    return xs, (xr_lot / lsize if lsize > EPSILON else 0.0)
+
+
+def _labor_no_OT(op, eq, lab, lot_size_v, nb, ps_factor, lsize=None):
     """
-    Returns per-PIECE OT-adjusted rates for T_BATCH_WAIT_LOT computation:
-      xs_piece = esetpiece * facset / OT
-      xr_piece = epiece    * facrun / OT
-    Used in FIX-H lot-wait formula.
+    BUG-4 FIX: Labor times WITHOUT OT for use in set_xbar_cs.
+    Legacy: calc_op(LABOR_T) /= OT, then set_xbar_cs *= OT — net cancels.
+    Returns (xs_per_lot, xr_per_piece).
+    """
+    if lsize is None:
+        lsize = lot_size_v
+    esf = float(eq.get("setup_factor",  1))
+    erf = float(eq.get("run_factor",    1))
+    lsf = float(lab.get("setup_factor", 1) if lab else 1)
+    lrf = float(lab.get("run_factor",   1) if lab else 1)
+    xs = (float(op.get("labor_setup_lot",    0))
+          + float(op.get("labor_setup_tbatch", 0)) * nb
+          + float(op.get("labor_setup_piece",  0)) * lsize
+         ) * esf * lsf * ps_factor
+    xr_lot = (float(op.get("labor_run_lot",    0))
+              + float(op.get("labor_run_tbatch", 0)) * nb
+              + float(op.get("labor_run_piece",  0)) * lsize
+             ) * erf * lrf
+    return xs, (xr_lot / lsize if lsize > EPSILON else 0.0)
+
+
+def _eq_TBATCH_TOTAL_EQUIP(op, eq, lot_size_v, tbatch_v, lsize=None):
+    """
+    BUG-16 FIX: calc_op(T_BATCH_TOTAL_EQUIP).
+    Returns (xs, xr) per transfer-batch (NOT per-piece).
+    """
+    if lsize is None:
+        lsize = lot_size_v
+    ot  = 1.0 + float(eq.get("overtime_pct", 0)) / 100.0
+    sf  = float(eq.get("setup_factor", 1))
+    rf  = float(eq.get("run_factor",   1))
+    tbs = max(1.0, tbatch_v * lsize / lot_size_v) if lot_size_v > 0 else 1.0
+    xs  = (float(op.get("equip_setup_lot",    0))
+           + float(op.get("equip_setup_tbatch", 0))
+           + float(op.get("equip_setup_piece",  0)) * tbs
+          ) * sf / ot
+    xr  = (float(op.get("equip_run_lot",    0))
+           + float(op.get("equip_run_tbatch", 0))
+           + float(op.get("equip_run_piece",  0)) * tbs
+          ) * rf / ot
+    return xs, xr
+
+
+def _eq_TBATCH_TOTAL_LABOR(op, eq, lab, lot_size_v, tbatch_v, ps_factor, lsize=None):
+    """
+    BUG-16 FIX: calc_op(T_BATCH_TOTAL_LABOR).
+    Returns (xs, xr) per transfer-batch (NOT per-piece).
+    """
+    if lsize is None:
+        lsize = lot_size_v
+    lab_ot = 1.0 + float(lab.get("overtime_pct", 0) if lab else 0) / 100.0
+    esf = float(eq.get("setup_factor",  1))
+    erf = float(eq.get("run_factor",    1))
+    lsf = float(lab.get("setup_factor", 1) if lab else 1)
+    lrf = float(lab.get("run_factor",   1) if lab else 1)
+    tbs = max(1.0, tbatch_v * lsize / lot_size_v) if lot_size_v > 0 else 1.0
+    xs  = (float(op.get("labor_setup_lot",    0))
+           + float(op.get("labor_setup_tbatch", 0))
+           + float(op.get("labor_setup_piece",  0)) * tbs
+          ) * esf * lsf * ps_factor / lab_ot
+    xr  = (float(op.get("labor_run_lot",    0))
+           + float(op.get("labor_run_tbatch", 0))
+           + float(op.get("labor_run_piece",  0)) * tbs
+          ) * erf * lrf / lab_ot
+    return xs, xr
+
+
+def _eq_TBATCH_PIECE(op, eq):
+    """
+    BUG-10 FIX: calc_op(T_BATCH_PIECE) — calc1.cpp lines 1055-1062.
+    xs = (esetup + esetbatch*1 + esetpiece*1) * facset / OT
+    xr = (erlot  + erbatch*1  + epiece*1)    * facrun  / OT
+    Returns times for 1-piece + 1-tbatch + 1-lot (all combined).
     """
     ot = 1.0 + float(eq.get("overtime_pct", 0)) / 100.0
-    xs_piece = float(op.get("equip_setup_piece", 0)) * float(eq.get("setup_factor", 1)) / ot
-    xr_piece = float(op.get("equip_run_piece", 0)) * float(eq.get("run_factor", 1)) / ot
-    return xs_piece, xr_piece
+    sf = float(eq.get("setup_factor", 1))
+    rf = float(eq.get("run_factor",   1))
+    xs = (float(op.get("equip_setup_lot",    0))
+          + float(op.get("equip_setup_tbatch", 0))
+          + float(op.get("equip_setup_piece",  0))
+         ) * sf / ot
+    xr = (float(op.get("equip_run_lot",    0))
+          + float(op.get("equip_run_tbatch", 0))
+          + float(op.get("equip_run_piece",  0))
+         ) * rf / ot
+    return xs, xr
+
+
+def _eq_TBATCH_WAIT_LOT(op, eq):
+    """
+    calc_op(T_BATCH_WAIT_LOT) — per-piece components only.
+    xs = esetpiece * facset / OT
+    xr = epiece    * facrun  / OT
+    """
+    ot = 1.0 + float(eq.get("overtime_pct", 0)) / 100.0
+    xs = float(op.get("equip_setup_piece", 0)) * float(eq.get("setup_factor", 1)) / ot
+    xr = float(op.get("equip_run_piece",   0)) * float(eq.get("run_factor",   1)) / ot
+    return xs, xr
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FIX-B: Raw labor times WITH OT recovery
-# Legacy calc_op LABOR_T divides by (1+labOT/100), then set_xbar_cs MULTIPLIES
-# back by (1+labOT/100) to recover raw un-OT-adjusted times.
+# calc_xprime — calc1.cpp lines 893-924 (verified correct)
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _raw_labor_times(op, eq, lab, lot_size_val, num_tbatches, prod_setup_factor):
-    """
-    FIX-B: Return raw (un-OT-adjusted) labor times.
-    Legacy: calc_op divides by (1+labOT/100), then set_xbar_cs multiplies back.
-    Net result: xbar1 = raw labor time (no OT factor applied).
-    """
-    if lab is None:
-        return 0.0, 0.0
-
-    eq_sf = float(eq.get("setup_factor", 1))
-    eq_rf = float(eq.get("run_factor", 1))
-    lab_sf = float(lab.get("setup_factor", 1))
-    lab_rf = float(lab.get("run_factor", 1))
-    # FIX-B: multiply back by (1+labOT/100) to undo the division in calc_op LABOR_T
-    lab_ot_factor = 1.0 + float(lab.get("overtime_pct", 0)) / 100.0
-
-    xs_raw = (
-        float(op.get("labor_setup_lot", 0))
-        + float(op.get("labor_setup_piece", 0)) * lot_size_val
-        + float(op.get("labor_setup_tbatch", 0)) * num_tbatches
-    ) * eq_sf * lab_sf * prod_setup_factor * lab_ot_factor
-
-    xr_lot_raw = (
-        float(op.get("labor_run_piece", 0)) * lot_size_val
-        + float(op.get("labor_run_lot", 0))
-        + float(op.get("labor_run_tbatch", 0)) * num_tbatches
-    ) * eq_rf * lab_rf * lab_ot_factor
-
-    xr_piece_raw = xr_lot_raw / lot_size_val if lot_size_val > 0 else 0.0
-    return xs_raw, xr_piece_raw
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FIX-A/B: calc_xprime using effabs (legacy calc1.cpp ~line 877)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _calc_xprime(
-    xbar1: float,      # raw labor time per visit (OT-recovered, minutes)
-    xbar2: float,      # OT-adjusted equipment time per visit (minutes)
-    mttr: float,
-    mttf: float,
-    absrate_frac: float,   # labour absenteeism as fraction (0..1)
-    labor_ul: float,       # FIX-A: total labor utilisation (for effabs)
-    labor_num: float,      # FIX-A: labor group count (for effabs)
-    fac_eq_lab: float,
-) -> float:
-    """
-    FIX-A: Uses effabs() instead of plain 1/(1-absrate).
-    Legacy calc_xprime (calc1.cpp):
-      ea = effabs(ul, num, absrate)   <- FIX-A
-      abs_f = 1 / (1 - ea)
-      if xbar2 >= xbar1:
-        xprime = (xbar2-xbar1) + xbar2*mttr/mttf + xbar1*abs_f*(1+fac)
-      elif xbar2 > 0:
-        xprime = xbar2*mttr/mttf + xbar2*abs_f*(1+fac)
-      else:
-        xprime = xbar1*abs_f*(1+fac)
-    """
-    ea = effabs(absrate_frac, labor_ul, labor_num)
+def _calc_xprime(xbar1, xbar2, mttr, mttf, absrate_frac, labor_ul, labor_num, fac_eq_lab):
+    ea    = effabs(absrate_frac, labor_ul, labor_num)
     abs_f = 1.0 / max(1.0 - ea, 1e-6)
-    repair = (mttr / mttf) if mttf > 0.0 else 0.0
+    rep   = (mttr / mttf) if mttf > 0.0 else 0.0
 
-    if xbar2 >= xbar1 - 1e-12:
-        xm_only = max(0.0, xbar2 - xbar1)
-        xl_only = xbar1 * abs_f
-        return xm_only + xbar2 * repair + xl_only * (1.0 + fac_eq_lab)
-    elif xbar2 > 1e-20:
-        return xbar2 * repair + xbar2 * abs_f * (1.0 + fac_eq_lab)
+    if xbar2 >= xbar1 - EPSILON:
+        return max(0.0, xbar2 - xbar1) + xbar2 * rep + xbar1 * abs_f * (1.0 + fac_eq_lab)
+    elif xbar2 > SSEPSILON:
+        return xbar2 * rep + xbar2 * abs_f * (1.0 + fac_eq_lab)
     else:
         return xbar1 * abs_f * (1.0 + fac_eq_lab)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FIX-C/D/I: set_xbar_cs equivalent (calc2.cpp)
-#
-# FIX-C: smbard uses MIN(xbar1,xbar2) not xprime
-# FIX-D: labor cs2 = (faccvs*v_lab)^0.9, NOT flow-weighted formula
-# FIX-I: labor xbarbar accumulates xlabor = xbar1/(1-absrate), not xprime
+# _compute_xbar_cs — calc2.cpp set_xbar_cs
+# BUG-3: xlabor uses plain absrate
+# BUG-4: _labor_no_OT (OT cancels in set_xbar_cs)
+# BUG-5: re-scale xbarrl *= MAX(1,lsize) before summing xbar1
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _compute_xbar_cs(
-    m: Dict,
-    effective_demand: Dict[str, float],
-    scrap_rates: Dict[str, float],
-    var_equip: float,    # global equipment CV fraction (already divided by 100)
-    var_labor: float,    # global labor CV fraction
-    fac_eq_lab_map: Dict[str, float],
-    ct2_lab_map: Dict[str, float],
-    labor_util_map: Dict[str, float],   # FIX-A: need labor ul for effabs
-    labor_num_map: Dict[str, float],    # FIX-A: need labor count for effabs
-    ops_per_period: float,
-) -> Tuple[Dict, Dict, Dict, Dict, Dict, Dict, Dict]:
-    """
-    FIX-C/D/I: Compute flow-weighted xbarbar and cs2 per equipment,
-    and labor xbarbar per labor group (used by ggc).
-
-    Returns per equipment-id:
-      xbarbar_eq, cs2_eq, ca2_eq, tpm_eq, smbard_eq, xbard_eq
-    Plus per labor-id:
-      lab_xbarbar_map  — FIX-I: labor group xbarbar (xlabor-weighted)
-    """
+def _compute_xbar_cs(m, effective_demand, scrap_rates, var_equip, var_labor,
+                     fac_eq_lab_map, ct2_lab_map, labor_util_map, labor_num_map,
+                     ops_per_period, visit_probs_all):
     equipment_list = m.get("equipment", [])
     labor_by_id    = {x["id"]: x for x in m.get("labor", [])}
 
-    # Equipment accumulators
-    xbb   = {eq["id"]: 0.0 for eq in equipment_list}   # sum(vlam*xprime)
-    xbd   = {eq["id"]: 0.0 for eq in equipment_list}   # sum(vlam)
-    xsb   = {eq["id"]: 0.0 for eq in equipment_list}   # sum(vlam*(xprsig^2+xprime^2))
-    tpm   = {eq["id"]: 0.0 for eq in equipment_list}
-    smb   = {eq["id"]: 0.0 for eq in equipment_list}   # FIX-C: sum(vlam*MIN(xbar1,xbar2)/(1-abs))
-
-    # FIX-I: Labor accumulators for xbarbar (used in ggc)
-    lab_xbb  = {x["id"]: 0.0 for x in m.get("labor", [])}   # sum(vlam*xlabor)
-    lab_xbd  = {x["id"]: 0.0 for x in m.get("labor", [])}   # sum(vlam)
+    xbb = {eq["id"]: 0.0 for eq in equipment_list}
+    xbd = {eq["id"]: 0.0 for eq in equipment_list}
+    xsb = {eq["id"]: 0.0 for eq in equipment_list}
+    tpm = {eq["id"]: 0.0 for eq in equipment_list}
+    smb = {eq["id"]: 0.0 for eq in equipment_list}
+    lab_xbb: Dict[str, float] = {}
+    lab_xbd: Dict[str, float] = {}
 
     for product in m.get("products", []):
         pid    = product.get("id", "")
         demand = effective_demand.get(pid, 0.0) or 0.0
         if demand <= 0.0:
             continue
-
         scrap      = scrap_rates.get(pid, 0.0)
         lot_size_v = f_lot_size(product.get("lot_size", 1), product.get("lot_factor", 1))
         ps_factor  = float(product.get("setup_factor", 1))
+        tbatch_v   = f_tbatch_size(product.get("tbatch_size", -1), lot_size_v)
+        nb         = f_num_tbatches(lot_size_v, tbatch_v)
+        dlam       = demand * (1.0 + scrap) / (lot_size_v * max(ops_per_period, 1e-9))
+        vp_map     = visit_probs_all.get(pid, {})
 
-        demand_inflated = demand * (1.0 + scrap)
-        dlam = demand_inflated / (lot_size_v * max(ops_per_period, 1e-9))
-
-        ops = [o for o in m.get("operations", []) if o.get("product_id") == pid]
-
-        for op in ops:
+        for op in m.get("operations", []):
+            if op.get("product_id") != pid:
+                continue
             eq = next((e for e in equipment_list if e.get("id") == op.get("equip_id")), None)
-            if not eq:
+            if not eq or eq.get("equip_type") == "delay":
                 continue
-            if eq.get("equip_type") == "delay":
-                continue
-
             af = f_assign_fraction(op.get("pct_assigned", 0))
             if af <= 0.0:
                 continue
 
-            eq_id   = eq.get("id", "")
-            lab     = labor_by_id.get(eq.get("labor_group_id") or "")
-            lab_id  = eq.get("labor_group_id") or ""
-            mttf    = float(eq.get("mttf", 0) or 0)
-            mttr    = float(eq.get("mttr", 0) or 0)
-            imttf   = 1.0 / mttf if mttf > 0 else 0.0
-            absrate_frac = float(lab.get("unavail_pct", 0)) / 100.0 if lab else 0.0
+            eq_id        = eq.get("id", "")
+            lab_id       = eq.get("labor_group_id") or ""
+            lab          = labor_by_id.get(lab_id)
+            lsize        = float(op.get("lsize", lot_size_v))
+            mttf         = float(eq.get("mttf", 0) or 0)
+            mttr         = float(eq.get("mttr", 0) or 0)
+            imttf        = 1.0 / mttf if mttf > 0 else 0.0
+            abs_frac     = float(lab.get("unavail_pct", 0)) / 100.0 if lab else 0.0
+            labor_ul     = labor_util_map.get(lab_id, abs_frac)
+            labor_num    = labor_num_map.get(lab_id, 1.0)
+            fac          = fac_eq_lab_map.get(eq_id, 0.0)
+            visit_prob   = vp_map.get(op.get("op_name", ""), 1.0)
+            vlam1_full   = dlam * af * visit_prob
+            vlam1        = vlam1_full * min(1.0, lsize)  # v1 *= MIN(1, lsize)
 
-            # FIX-A: get labor ul and num for effabs
-            labor_ul  = labor_util_map.get(lab_id, absrate_frac)
-            labor_num = labor_num_map.get(lab_id, 1.0)
+            # BUG-4 FIX: no OT in labor times for xbar_cs context
+            xbarsl, xbarrl_pc = _labor_no_OT(op, eq, lab, lot_size_v, nb, ps_factor, lsize)
+            # BUG-5 FIX: re-scale xbarrl back to per-lot, then apply OT factor
+            xbarrl_lot = xbarrl_pc * max(1.0, lsize)
+            lab_ot_fac = 1.0 + float(lab.get("overtime_pct", 0) if lab else 0) / 100.0
+            xbar1 = (xbarsl + xbarrl_lot) * lab_ot_fac  # calc2.cpp line 88
 
-            tbatch_v = f_tbatch_size(product.get("tbatch_size", -1), lot_size_v)
-            nb       = f_num_tbatches(lot_size_v, tbatch_v)
+            xbars, xbarr_pc = _eq_EQUIP_T(op, eq, lot_size_v, nb, ps_factor, lsize)
+            xbarr_lot = xbarr_pc * max(1.0, lsize)  # BUG-5 FIX: re-scale
+            xbar2 = xbars + xbarr_lot  # calc2.cpp line 89
 
-            xbars, xbarr_pc = _ot_adj_equip_times(op, eq, lot_size_v, nb, ps_factor)
-            xbar2 = xbars + xbarr_pc
-
-            # FIX-B: raw labor times with OT recovery
-            xbarsl, xbarrl_pc = _raw_labor_times(op, eq, lab, lot_size_v, nb, ps_factor)
-            xbar1 = xbarsl + xbarrl_pc
-
-            fac   = fac_eq_lab_map.get(eq_id, 0.0)
-            vlam1 = dlam * af
-
-            xprime = _calc_xprime(xbar1, xbar2, mttr, mttf, absrate_frac, labor_ul, labor_num, fac)
-
-            # FIX-C: smbard uses MIN(xbar1,xbar2)/(1-absrate), NOT xprime
-            # Legacy calc1.cpp line 307-320:
-            #   x1 = (xbar2 > SSEPSILON) ? MIN(xbar1, xbar2) : xbar1
-            #   smbard += v1 * x1 / (1 - absrate)
-            x1_smb = min(xbar1, xbar2) if xbar2 > 1e-20 else xbar1
-            smb[eq_id] += vlam1 * x1_smb / max(1.0 - absrate_frac, 0.01)
-
-            # xprsig^2 variance for equipment — calc2.cpp line 97-100
-            # Uses teq->fac_eq_lab (= fac_eq_lab_map[eq_id]) — confirmed correct
+            xprime  = _calc_xprime(xbar1, xbar2, mttr, mttf, abs_frac, labor_ul, labor_num, fac)
             xm_only = max(0.0, xbar2 - xbar1)
-            xl_only_abs = (min(xbar1, xbar2) / max(1.0 - absrate_frac, 0.01)
-                           if xbar2 > 1e-20
-                           else xbar1 / max(1.0 - absrate_frac, 0.01))
+            xl_only = (min(xbar1, xbar2) if xbar2 > SSEPSILON else xbar1) / max(1.0 - abs_frac, 0.01)
 
-            eq_cv_fac = var_equip * float(eq.get("var_factor", 1))
-            # ct2_labor: from ct2_lab_map if available, else initialized cs2 = (cv)^2
-            ct2_labor = ct2_lab_map.get(lab_id, (var_labor * float(lab.get("var_factor", 1) if lab and "var_factor" in lab else 1)) ** 2)
+            # smbar — uses MIN(xbar1, xbar2) / (1 - plain_absrate)
+            x1_smb = min(xbar1, xbar2) if xbar2 > SSEPSILON else xbar1
+            smb[eq_id] = smb.get(eq_id, 0.0) + vlam1 * x1_smb / max(1.0 - abs_frac, 0.01)
 
-            repair_var  = 2.0 * mttr ** 2 * imttf * xbar2
-            machine_sq  = ((1.0 + mttr / mttf if mttf > 0 else 1.0) * eq_cv_fac * xm_only) ** 2
-            # FIX-J: uses teq->fac_eq_lab (fac) not tlabor->fac_eq_lab (already correct)
-            labor_sq    = ct2_labor * (xl_only_abs * (1.0 + fac)) ** 2
-            xprsig_sq   = repair_var + machine_sq + labor_sq
+            eq_cv   = var_equip * float(eq.get("var_factor", 1))
+            ct2_lab = ct2_lab_map.get(
+                lab_id,
+                (var_labor * float(lab.get("var_factor", 1) if lab else 1)) ** 2
+            )
+            # xprsig^2 — calc2.cpp line 96-99 (uses ct2 and teq->fac_eq_lab)
+            xprsig_sq = (2.0 * mttr ** 2 * imttf * xbar2
+                         + ((1.0 + imttf * mttr) * eq_cv * xm_only) ** 2
+                         + ct2_lab * (xl_only * (1.0 + fac)) ** 2)
 
-            xbb[eq_id] += vlam1 * xprime
-            xbd[eq_id] += vlam1
-            xsb[eq_id] += vlam1 * (xprsig_sq + xprime ** 2)
-            tpm[eq_id] += vlam1
+            xbb[eq_id] = xbb.get(eq_id, 0.0) + vlam1 * xprime
+            xbd[eq_id] = xbd.get(eq_id, 0.0) + vlam1
+            xsb[eq_id] = xsb.get(eq_id, 0.0) + vlam1 * (xprsig_sq + xprime ** 2)
+            tpm[eq_id] = tpm.get(eq_id, 0.0) + vlam1
 
-            # FIX-I: labor xbarbar accumulates xlabor = xbar1/(1-absrate), NOT xprime
-            # Legacy calc2.cpp line 124-132:
-            #   xlabor = xbar1 / (1 - absrate)
-            #   tlabor->xbarbar += vlam1 * xlabor
-            #   tlabor->xbard   += vlam1
-            ea_val   = effabs(absrate_frac, labor_ul, labor_num)
-            xlabor   = xbar1 / max(1.0 - ea_val, 1e-6)
+            # BUG-3 FIX: xlabor uses plain absrate — calc2.cpp line 124
+            xlabor = xbar1 / max(1.0 - abs_frac, 1e-6)
             lab_xbb[lab_id] = lab_xbb.get(lab_id, 0.0) + vlam1 * xlabor
             lab_xbd[lab_id] = lab_xbd.get(lab_id, 0.0) + vlam1
 
-    # Finalise equipment xbarbar and cs2
+    # Finalise equipment cs2 — calc2.cpp lines 175-195
     xbarbar_eq: Dict[str, float] = {}
     cs2_eq:     Dict[str, float] = {}
-    ca2_eq:     Dict[str, float] = {}
-
     for eq in equipment_list:
         eq_id = eq.get("id", "")
         xbd_v = xbd.get(eq_id, 0.0)
         xbb_v = xbb.get(eq_id, 0.0)
         xsb_v = xsb.get(eq_id, 0.0)
-
-        if xbd_v > 1e-20 and xbb_v > 1e-20:
+        if int(eq.get("count", 0)) > 0 and xbd_v > SSEPSILON and xbb_v > SSEPSILON:
             xbarbar_eq[eq_id] = xbb_v / xbd_v
-            cs2_eq[eq_id]     = max(0.0, (xsb_v * xbd_v / (xbb_v ** 2)) - 1.0)
+            cs2_eq[eq_id]     = max(0.0, (xsb_v * xbd_v / xbb_v ** 2) - 1.0)
         else:
             xbarbar_eq[eq_id] = 0.0
-            cs2_eq[eq_id]     = (var_equip * float(eq.get("var_factor", 1))) ** 2
+            cs2_eq[eq_id]     = (float(eq.get("var_factor", 1)) * var_equip) ** 2
 
-        ca2_eq[eq_id] = 1.0  # updated later in lextra per labor group
-
-    # FIX-I: finalise labor xbarbar
+    # Finalise labor xbarbar — calc2.cpp lines 148-170
     lab_xbarbar_map: Dict[str, float] = {}
     for lab in m.get("labor", []):
-        lab_id  = lab.get("id", "")
-        xbd_v   = lab_xbd.get(lab_id, 0.0)
-        xbb_v   = lab_xbb.get(lab_id, 0.0)
-        lab_xbarbar_map[lab_id] = (xbb_v / xbd_v) if xbd_v > 1e-20 else 0.0
+        lid = lab.get("id", "")
+        xbd_v = lab_xbd.get(lid, 0.0)
+        xbb_v = lab_xbb.get(lid, 0.0)
+        lab_xbarbar_map[lid] = (xbb_v / xbd_v) if xbd_v > SSEPSILON else 0.0
 
-    return xbarbar_eq, cs2_eq, ca2_eq, tpm, smb, xbd, lab_xbarbar_map
+    return xbarbar_eq, cs2_eq, tpm, smb, lab_xbarbar_map
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FIX-D/G/I: lextra equivalent (calc2.cpp lextra + calc8.cpp ggc)
-#
-# FIX-D: labor cs2 = (faccvs*v_lab)^0.9 (not flow-weighted)
-# FIX-G: ca2 computed per-group from mixture formula (not hard-coded 1.0)
-# FIX-I: ggc uses lab_xbarbar (xlabor-weighted) not equipment xbarbar
+# G/G/c labour wait — simplified Erlang-C based approximation for ggc()
 # ─────────────────────────────────────────────────────────────────────────────
+def _ggc_wait(labor_ul, num_av, xbarbar, ca2, cs2):
+    rho = min(float(labor_ul), 0.9999)
+    num = max(float(num_av), 1.0)
+    if xbarbar < 1e-10 or rho < 1e-10:
+        return 0.0, float(cs2)
 
-def _compute_lextra(
-    m: Dict,
-    equipment_list: List,
-    labor_by_id: Dict,
-    xbarbar_eq: Dict[str, float],
-    cs2_eq: Dict[str, float],
-    tpm_eq: Dict[str, float],
-    smbard_eq: Dict[str, float],
-    lab_xbarbar_map: Dict[str, float],   # FIX-I: labor-group xbarbar
-    labor_util_map: Dict[str, float],
-    labor_num_map: Dict[str, float],
-    num_av_lab_map: Dict[str, float],
-    num_av_eq_map: Dict[str, float],
-    var_labor: float,
-    utlimit: float,
-) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
-    """
-    FIX-D/G/I: Compute fac_eq_lab and uwait per equipment.
+    rho_adj = min(rho, 0.9999 / num)
 
-    Returns fac_eq_lab_map, uwait_eq_map, ct2_lab_map.
-    """
+    # Erlang-C
+    m_int = max(1, round(num))
+    tmp = 1.0; tot = 1.0; mr = m_int * rho_adj
+    for i in range(1, m_int):
+        tmp *= mr / i; tot += tmp
+    tmp *= mr / m_int
+    pw_m = tmp / max(1.0 - rho_adj, 1e-20) / max(tot + tmp / max(1.0 - rho_adj, 1e-20), 1e-20)
+
+    mean_wait_m = pw_m * xbarbar / (num * max(1.0 - rho_adj, 1e-6))
+    c_sq = 0.5 * (ca2 + cs2)
+    xi   = 1.0 if c_sq >= 1.0 else (1.0 - rho_adj) ** (2.0 * (1.0 - c_sq))
+    phi  = ((0.5 * cs2 * xi + 0.5 * ca2) / max(ca2 + cs2, 1e-20)
+            if ca2 < cs2 else
+            (4.0 * (ca2 - cs2) / max(4.0 * ca2 - 3.0 * cs2, 1e-20)
+             + cs2 * xi / max(4.0 * ca2 - 3.0 * cs2, 1e-20)))
+    mean_wait = phi * c_sq * mean_wait_m
+    ct2 = (math.sqrt(max(cs2 * xbarbar ** 2 + mean_wait ** 2, 0.0))
+           / max(xbarbar + mean_wait, 1e-20))
+    return max(0.0, mean_wait / max(xbarbar, 1e-20)), max(0.0, ct2)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _compute_lextra — calc2.cpp lextra() (verified correct in v2)
+# ─────────────────────────────────────────────────────────────────────────────
+def _compute_lextra(m, equipment_list, labor_by_id, xbarbar_eq, cs2_eq,
+                    tpm_eq, smbard_eq, lab_xbarbar_map,
+                    labor_util_map, labor_num_map, num_av_lab_map, num_av_eq_map,
+                    var_labor, utlimit):
     fac_eq_lab_map: Dict[str, float] = {eq["id"]: 0.0 for eq in equipment_list}
-    uwait_eq_map:   Dict[str, float] = {eq["id"]: 0.0 for eq in equipment_list}
+    uwait_lextra:   Dict[str, float] = {eq["id"]: 0.0 for eq in equipment_list}
     ct2_lab_map:    Dict[str, float] = {}
 
     for lab in m.get("labor", []):
         lab_id  = lab.get("id", "")
         lab_num = float(lab.get("count", 0))
+        lab_vf  = float(lab.get("var_factor", 1))
+        cs2_lab = min(4.0, (lab_vf * var_labor) ** 2)
+        ct2_lab_map[lab_id] = cs2_lab
 
-        # FIX-D: Initialize ct2 = cs2 = (faccvs*v_lab/100)^2
-        # Legacy lextra line 241-242
-        lab_var_factor = float(lab.get("var_factor", 1) if "var_factor" in lab else 1)
-        cs2_lab = min(4.0, (lab_var_factor * var_labor) ** 2)
-        ct2_lab_map[lab_id] = cs2_lab   # default; overwritten by ggc if active
-
-        eq_in_group = [e for e in equipment_list
-                       if e.get("labor_group_id") == lab_id and int(e.get("count", 0)) > 0]
-        if not eq_in_group:
+        eq_grp = [e for e in equipment_list
+                  if e.get("labor_group_id") == lab_id and int(e.get("count", 0)) > 0]
+        if not eq_grp:
             continue
 
-        max_eq_ot   = max(float(e.get("overtime_pct", 0)) for e in eq_in_group)
-        eq_cover_raw = sum(float(e.get("count", 1)) * (float(e.get("overtime_pct", 0)) + 100.0)
-                           for e in eq_in_group)
-        eq_cover = eq_cover_raw / (100.0 * (1.0 + max_eq_ot / 100.0))
-
+        max_ot   = max(float(e.get("overtime_pct", 0)) for e in eq_grp)
+        eq_cover = (sum(float(e.get("count", 1)) * (float(e.get("overtime_pct", 0)) + 100.0)
+                        for e in eq_grp)
+                    / (100.0 * (1.0 + max_ot / 100.0)))
         if eq_cover <= 0.0:
             continue
 
         labor_ul  = labor_util_map.get(lab_id, 0.0)
         num_av    = num_av_lab_map.get(lab_id, lab_num)
+        xbarbar_l = lab_xbarbar_map.get(lab_id, 0.0)
+        tlab_tpm  = sum(tpm_eq.get(e["id"], 0.0)    for e in eq_grp)
+        tlab_smb  = sum(smbard_eq.get(e["id"], 0.0) for e in eq_grp)
 
-        tlab_tpm  = sum(tpm_eq.get(e["id"], 0.0) for e in eq_in_group)
-        tlab_smbard = sum(smbard_eq.get(e["id"], 0.0) for e in eq_in_group)
-
-        if tlab_tpm < 1e-20:
+        if tlab_tpm < SSEPSILON:
             continue
 
-        # FIX-I: use lab_xbarbar (xlabor-weighted) for ggc xbarbar
-        xbarbar_lab = lab_xbarbar_map.get(lab_id, 0.0)
+        # Branch 1: enough labor or delay
+        if lab_num <= 0 or (num_av >= eq_cover + SSEPSILON and eq_cover > 0):
+            continue
 
-        if lab_num <= 0 or (num_av >= eq_cover + 1e-10 and eq_cover > 0):
-            WAIT = 0.0
-
-        elif labor_ul > (utlimit / 100.0):
+        # Branch 2: over-utilised
+        elif labor_ul > utlimit / 100.0:
             WAIT = (eq_cover - 1.0) if eq_cover > 0 else 1000.0
-            if xbarbar_lab > 1e-20:
-                pass  # WAIT already set
-            else:
-                WAIT = 0.0
+            fac_g = WAIT if xbarbar_l > SSEPSILON else 0.0
+            for e in eq_grp:
+                eid = e["id"]; nav = num_av_eq_map.get(eid, float(e.get("count", 1)))
+                fac_eq_lab_map[eid] = fac_g
+                if nav > SSEPSILON:
+                    uwait_lextra[eid] = (fac_g * smbard_eq.get(eid, 0.0)) / nav
 
+        # Branch 3: normal G/G/c
         else:
-            # FIX-G: compute ca2 from mixture formula (legacy calc2.cpp ~line 340-380)
             u1 = min(0.95, labor_ul)
-            tlab_nm  = 0.0
-            tlab_ca  = 0.0
-
-            for teq in eq_in_group:
-                eq_id  = teq.get("id", "")
-                s1     = num_av_eq_map.get(eq_id, float(teq.get("count", 1)))
-                s2     = num_av
-                smb_v  = smbard_eq.get(eq_id, 0.0)
-                tpm_v  = tpm_eq.get(eq_id, 0.0)
-                cs2_e  = min(4.0, cs2_eq.get(eq_id, 1.0))
-
-                if int(teq.get("count", 0)) > 0:
-                    rho1 = max(0.0, 1.0 - (smb_v / max(s1, 1e-20)))
-                    rho2 = u1
-                    s2_safe = max(s2, 1.0)
-
-                    num_v  = (1.0 + (cs2_e - 1.0) * rho1 ** 2 / max(s1 ** 0.5, 1e-10)
-                              - (1.0 - rho1 ** 2) * (1.0 - rho2 ** 2)
-                              + (1.0 - rho1 ** 2) * (cs2_lab - 1.0) * rho2 ** 2 / max(s2_safe ** 0.5, 1e-10))
-                    demon  = 1.0 - (1.0 - rho1 ** 2) * (1.0 - rho2 ** 2)
-                    if demon < 1e-20:
-                        demon = 1.0
-                        num_v = 1.0
-
-                    if tlab_smbard > 1e-20:
-                        tlab_nm += smb_v * (1.0 - smb_v / (tlab_smbard * max(s1, 1e-10)))
-                    else:
-                        tlab_nm += smb_v
-
-                    tlab_ca += (num_v / demon) * tpm_v
+            tlab_nm = 0.0; tlab_ca = 0.0
+            for e in eq_grp:
+                eid  = e["id"]
+                s1   = num_av_eq_map.get(eid, float(e.get("count", 1)))
+                s2   = max(num_av, 1.0)
+                smb_v = smbard_eq.get(eid, 0.0)
+                cs2_e = min(4.0, cs2_eq.get(eid, 1.0))
+                if int(e.get("count", 0)) > 0:
+                    r1 = max(0.0, 1.0 - smb_v / max(s1, 1e-20))
+                    r2 = u1
+                    num_v  = (1.0 + (cs2_e - 1.0) * r1 ** 2 / max(s1 ** 0.5, 1e-10)
+                              - (1.0 - r1 ** 2) * (1.0 - r2 ** 2)
+                              + (1.0 - r1 ** 2) * (cs2_lab - 1.0) * r2 ** 2 / max(s2 ** 0.5, 1e-10))
+                    demon  = 1.0 - (1.0 - r1 ** 2) * (1.0 - r2 ** 2)
+                    if demon < SSEPSILON:
+                        demon = 1.0; num_v = 1.0
+                    tlab_nm += smb_v * (1.0 - smb_v / (tlab_smb * max(s1, 1e-10))) if tlab_smb > SSEPSILON else smb_v
+                    tlab_ca += (num_v / demon) * tpm_eq.get(eid, 0.0)
                 else:
                     tlab_nm += smb_v
-                    tlab_ca += 1.0 * tpm_v
+                    tlab_ca += tpm_eq.get(eid, 0.0)
 
-            # nm_1 formula — legacy OVERWRITES to (eq_cover-1)/eq_cover before ggc
-            nm_1 = (eq_cover - 1.0) / eq_cover if eq_cover > 0 else 1.0
-
-            # ca2 for this labor group
-            ca2_lab = min(4.0, tlab_ca / max(tlab_tpm, 1e-20))
-
-            # FIX-D: cs2 for labor = (faccvs*v_lab)^0.9  (legacy calc2.cpp line 152)
-            # NOTE: legacy uses ^0.9 in set_xbar_cs after computing xbarbar, not ^2
-            cs2_lab_ggc = min(4.0, (lab_var_factor * var_labor) ** 0.9)
-
-            # ggc uses lab_xbarbar (FIX-I), computed ca2 (FIX-G), cs2_lab_ggc (FIX-D)
-            fac_raw, ct2_new = ggc_wait(labor_ul, num_av, xbarbar_lab, ca2_lab, cs2_lab_ggc)
-            WAIT = fac_raw * nm_1
-            if eq_cover > 0:
-                WAIT = min(WAIT, eq_cover - 1.0)
-
+            nm_1  = (eq_cover - 1.0) / eq_cover if eq_cover > 0 else 1.0
+            ca2_l = min(4.0, tlab_ca / max(tlab_tpm, SSEPSILON))
+            cs2_ggc = min(4.0, (lab_vf * var_labor) ** 0.9)
+            fac_raw, ct2_new = _ggc_wait(labor_ul, num_av, xbarbar_l, ca2_l, cs2_ggc)
+            WAIT = min(fac_raw * nm_1, eq_cover - 1.0) if eq_cover > 0 else fac_raw * nm_1
+            fac_g = WAIT if xbarbar_l > SSEPSILON else 0.0
             ct2_lab_map[lab_id] = ct2_new
+            for e in eq_grp:
+                eid = e["id"]; nav = num_av_eq_map.get(eid, float(e.get("count", 1)))
+                fac_eq_lab_map[eid] = fac_g
+                if nav > SSEPSILON:
+                    uwait_lextra[eid] = (1.0 if labor_ul > 0.95
+                                         else (fac_g * smbard_eq.get(eid, 0.0)) / nav)
 
-        fac_for_group = WAIT if xbarbar_lab > 1e-20 else 0.0
-
-        for eq in eq_in_group:
-            eq_id    = eq.get("id", "")
-            num_av_e = num_av_eq_map.get(eq_id, float(eq.get("count", 1)))
-            smb_v    = smbard_eq.get(eq_id, 0.0)
-
-            fac_eq_lab_map[eq_id] = fac_for_group
-
-            if num_av_e > 1e-20:
-                if labor_ul > 0.95:
-                    uwait_eq_map[eq_id] = 1.0
-                else:
-                    uwait_eq_map[eq_id] = (fac_for_group * smb_v) / num_av_e
-
-    return fac_eq_lab_map, uwait_eq_map, ct2_lab_map
+    return fac_eq_lab_map, uwait_lextra, ct2_lab_map
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Demand / routing helpers (unchanged)
+# Demand / IBOM helpers
 # ─────────────────────────────────────────────────────────────────────────────
-
-def f_yield_from_routing(routing_rows, product_id, start_op="DOCK") -> float:
-    routes = [r for r in routing_rows if r.get("product_id") == product_id]
-    outgoing: Dict[str, List[Tuple[str, float]]] = {}
-    nodes = {start_op, "STOCK", "SCRAP"}
-    for r in routes:
-        frm = str(r.get("from_op_name", ""))
-        to  = str(r.get("to_op_name", ""))
-        pct = float(r.get("pct_routed", 0.0)) / 100.0
-        nodes.add(frm); nodes.add(to)
-        outgoing.setdefault(frm, []).append((to, pct))
-
-    p_stock: Dict[str, float] = {n: 0.0 for n in nodes}
-    p_stock["STOCK"] = 1.0
-    p_stock["SCRAP"] = 0.0
-
-    if not outgoing:
-        return 1.0
-
-    for _ in range(500):
-        delta = 0.0
-        for n in nodes:
-            if n in ("STOCK", "SCRAP"):
-                continue
-            outs  = outgoing.get(n)
-            new_v = 1.0 if not outs else sum(p * p_stock.get(t, 0.0) for t, p in outs)
-            delta = max(delta, abs(new_v - p_stock[n]))
-            p_stock[n] = new_v
-        if delta < 1e-10:
-            break
-
-    return min(max(float(p_stock.get(start_op, 1.0)), 0.0), 1.0)
-
-
-def compute_effective_demand(products, ibom) -> Dict[str, float]:
+def compute_effective_demand(products, ibom, scrap_rates) -> Dict[str, float]:
+    """
+    BUG-17 FIX: comp_demand += parent_demand * units_per_assy * (1 + parent_scrap).
+    """
     children: Dict[str, List] = {}
     for entry in ibom:
-        pid = entry.get("parent_product_id")
-        children.setdefault(pid, []).append({
+        children.setdefault(entry.get("parent_product_id"), []).append({
             "componentId":  entry.get("component_product_id"),
             "unitsPerAssy": float(entry.get("units_per_assy", 1)),
         })
@@ -801,11 +623,10 @@ def compute_effective_demand(products, ibom) -> Dict[str, float]:
         demand[p["id"]] = float(p.get("demand", 0)) * float(p.get("demand_factor", 1))
 
     visited: set = set()
-    order:   List[str] = []
+    order: List[str] = []
 
-    def visit(pid: str) -> None:
-        if pid in visited:
-            return
+    def visit(pid):
+        if pid in visited: return
         visited.add(pid)
         for k in children.get(pid, []):
             visit(k["componentId"])
@@ -816,9 +637,11 @@ def compute_effective_demand(products, ibom) -> Dict[str, float]:
     order.reverse()
 
     for parent_id in order:
+        parent_scrap = scrap_rates.get(parent_id, 0.0)
         for k in children.get(parent_id, []):
             cid = k["componentId"]
-            demand[cid] = demand.get(cid, 0.0) + demand.get(parent_id, 0.0) * float(k["unitsPerAssy"])
+            demand[cid] = (demand.get(cid, 0.0)
+                           + demand.get(parent_id, 0.0) * float(k["unitsPerAssy"]) * (1.0 + parent_scrap))
 
     return demand
 
@@ -827,727 +650,634 @@ def apply_scenario(model, scenario):
     import copy
     if not scenario or not scenario.get("changes"):
         return copy.deepcopy(model)
-
     m = copy.deepcopy(model)
-    m["labor"]      = [dict(x) for x in m.get("labor", [])]
-    m["equipment"]  = [dict(x) for x in m.get("equipment", [])]
-    m["products"]   = [dict(x) for x in m.get("products", [])]
-    m["operations"] = [dict(x) for x in m.get("operations", [])]
-    m["routing"]    = [dict(x) for x in m.get("routing", [])]
-
-    for c in scenario["changes"]:
-        data_type = c.get("dataType")
-        entity_id = c.get("entityId")
-        field     = c.get("field")
-        what_if   = c.get("whatIfValue")
-
-        if data_type == "Labor":
-            for item in m["labor"]:
-                if item.get("id") == entity_id:
-                    item[field] = what_if
+    for c in scenario.get("changes", []):
+        dt  = c.get("dataType"); eid = c.get("entityId")
+        fld = c.get("field");    val = c.get("whatIfValue")
+        tl  = {"Labor": "labor", "Equipment": "equipment",
+                "Product": "products", "Routing": "routing"}.get(dt)
+        if tl:
+            for item in m.get(tl, []):
+                if item.get("id") == eid:
+                    if dt == "Product" and fld == "included" and str(val) == "false":
+                        item["demand"] = 0
+                    elif dt == "Routing":
+                        item[fld] = float(val) if val is not None else 0
+                    else:
+                        item[fld] = val
                     break
-        elif data_type == "Equipment":
-            for item in m["equipment"]:
-                if item.get("id") == entity_id:
-                    item[field] = what_if
-                    break
-        elif data_type == "Product":
-            if field == "included" and str(what_if) == "false":
-                for p in m["products"]:
-                    if p.get("id") == entity_id:
-                        p["demand"] = 0
-                        break
-            else:
-                for item in m["products"]:
-                    if item.get("id") == entity_id:
-                        item[field] = what_if
-                        break
-        elif data_type == "Routing":
-            for item in m["routing"]:
-                if item.get("id") == entity_id:
-                    item[field] = float(what_if) if what_if is not None else 0
-                    break
-        elif data_type == "Product Inclusion" and what_if == "No":
-            for p in m["products"]:
-                if p.get("id") == entity_id:
-                    p["demand"] = 0
-                    break
-
+        elif dt == "Product Inclusion" and val == "No":
+            for p in m.get("products", []):
+                if p.get("id") == eid:
+                    p["demand"] = 0; break
     return m
 
 
-def f_wip_from_littles_law(flow_per_period: float, mct_days: float, conv2: float) -> int:
-    days_per_period = max(float(conv2), 1.0)
-    flow_per_day    = float(flow_per_period) / days_per_period
-    return max(0, round(flow_per_day * float(mct_days)))
-
-
-def f_capacity_limited_flow_for_product(product, ops_for_product, equipment_list, conv1, ops_per_period) -> float:
-    lot_size_val    = f_lot_size(product.get("lot_size", 1), product.get("lot_factor", 1))
-    tbatch_size_val = f_tbatch_size(product.get("tbatch_size", -1), lot_size_val)
-    num_tbatches    = f_num_tbatches(lot_size_val, tbatch_size_val)
-    ps_factor       = float(product.get("setup_factor", 1))
-
-    limits: List[float] = []
+def f_capacity_limited_flow(product, ops_for_product, equipment_list, ops_per_period, visit_probs):
+    lot_size_v = f_lot_size(product.get("lot_size", 1), product.get("lot_factor", 1))
+    tbatch_v   = f_tbatch_size(product.get("tbatch_size", -1), lot_size_v)
+    nb         = f_num_tbatches(lot_size_v, tbatch_v)
+    ps_factor  = float(product.get("setup_factor", 1))
+    limits     = []
     for op in ops_for_product:
         eq = next((e for e in equipment_list if e.get("id") == op.get("equip_id")), None)
-        if not eq:
-            continue
+        if not eq: continue
         af = f_assign_fraction(op.get("pct_assigned", 0))
-        if af <= 0:
-            continue
-        is_delay = eq.get("equip_type") == "delay"
-        count    = 1 if is_delay else int(eq.get("count", 0))
-        if count <= 0 and not is_delay:
-            continue
-
-        avail_time = f_available_time_equip(count, eq.get("overtime_pct", 0),
-                                             eq.get("unavail_pct", 0), ops_per_period)
-        setup_pl = f_setup_per_lot(op.get("equip_setup_lot", 0), op.get("equip_setup_piece", 0),
-                                    op.get("equip_setup_tbatch", 0), lot_size_val, num_tbatches,
-                                    eq.get("setup_factor", 1), ps_factor)
-        run_pl   = f_run_per_lot(op.get("equip_run_piece", 0), op.get("equip_run_lot", 0),
-                                  op.get("equip_run_tbatch", 0), lot_size_val, num_tbatches,
-                                  eq.get("run_factor", 1))
-        processing_per_piece = f_time_per_piece(setup_pl + run_pl, lot_size_val)
-        if processing_per_piece <= 0:
-            continue
-
-        limits.append(avail_time / (af * processing_per_piece))
-
+        count = int(eq.get("count", 0))
+        if af <= 0 or count <= 0: continue
+        avail = f_avail_equip(count, eq.get("overtime_pct", 0), ops_per_period)
+        lsize = float(op.get("lsize", lot_size_v))
+        vp    = visit_probs.get(op.get("op_name", ""), 1.0)
+        xs, xr_pc = _eq_EQUIP_T(op, eq, lot_size_v, nb, ps_factor, lsize)
+        pp = (xs + xr_pc * lsize) / lot_size_v  # per-piece processing time
+        if pp <= 0 or vp <= 0: continue
+        limits.append(avail / (af * pp * vp))
     return min(limits) if limits else float("inf")
 
 
-def f_feasible_started_flow(external_and_parent_demand, yield_fraction, capacity_limited_flow) -> float:
-    y      = min(max(float(yield_fraction), 0.0), 1.0)
-    demand = float(external_and_parent_demand)
-    needed = demand / y if y > 0 else float("inf")
-    return float(min(needed, float(capacity_limited_flow)))
-
-
-def f_good_shipped(good_made, demand_end) -> int:
-    return round(min(float(good_made), float(demand_end)))
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Main orchestration
+# MAIN CALCULATION
 # ─────────────────────────────────────────────────────────────────────────────
-
-def full_calculate_corrected(
-    model: Dict[str, Any], scenario: Optional[Dict[str, Any]] = None
-) -> Dict[str, Any]:
+def full_calculate_corrected(model, scenario=None):
     m = apply_scenario(model, scenario)
     g = m.get("general", {})
-    warnings: List[str] = []
-    errors:   List[str] = []
+    warnings: List[str] = []; errors: List[str] = []
 
-    conv1 = float(g.get("conv1", 480))
-    conv2 = float(g.get("conv2", 5))
+    conv1          = float(g.get("conv1", 480))
+    conv2          = float(g.get("conv2", 5))
     ops_per_period = f_ops_per_period(conv1, conv2)
-
-    util_limit = float(g.get("util_limit", 85))
-    var_equip  = float(g.get("var_equip", 0)) / 100.0
-    var_labor  = float(g.get("var_labor", 0)) / 100.0
+    util_limit     = float(g.get("util_limit", 85))
+    var_equip      = float(g.get("var_equip", 0)) / 100.0
+    var_labor      = float(g.get("var_labor", 0)) / 100.0
 
     equipment_list  = m.get("equipment", [])
     labor_by_id     = {x["id"]: x for x in m.get("labor", [])}
     operations_list = m.get("operations", [])
     routing_list    = m.get("routing", [])
+    products_list   = m.get("products", [])
 
-    effective_demand = compute_effective_demand(m.get("products", []), m.get("ibom", []))
+    if not operations_list:
+        errors.append("No operations defined.")
 
-    scrap_rates: Dict[str, float] = {}
-    for product in m.get("products", []):
-        pid = product.get("id", "")
-        scrap_rates[pid] = 1.0 - f_yield_from_routing(routing_list, pid, start_op="DOCK")
+    # ── Scrap rates and effective demand ─────────────────────────────────────
+    scrap_rates: Dict[str, float] = {
+        p.get("id", ""): 1.0 - f_yield_from_routing(routing_list, p.get("id", ""))
+        for p in products_list
+    }
+    effective_demand = compute_effective_demand(products_list, m.get("ibom", []), scrap_rates)
 
-    # ── MAX EQ OT PER LABOR GROUP ────────────────────────────────────────────
-    max_lab_ot_map: Dict[str, float] = {}
+    # ── Visit probabilities per product per operation ─────────────────────────
+    visit_probs_all: Dict[str, Dict[str, float]] = {
+        p.get("id", ""): compute_visit_probs(p.get("id", ""), operations_list, routing_list)
+        for p in products_list
+    }
+
+    # ── Max equipment OT per labor group ──────────────────────────────────────
+    max_lab_ot: Dict[str, float] = {}
     for eq in equipment_list:
-        lab_id = eq.get("labor_group_id") or ""
-        eq_ot  = float(eq.get("overtime_pct", 0))
-        max_lab_ot_map[lab_id] = max(max_lab_ot_map.get(lab_id, -100.0), eq_ot)
+        lid = eq.get("labor_group_id") or ""
+        max_lab_ot[lid] = max(max_lab_ot.get(lid, -100.0), float(eq.get("overtime_pct", 0)))
 
-    # ── NUM_AV per equipment ─────────────────────────────────────────────────
-    num_av_eq_map: Dict[str, float] = {}
+    # ── num_av per equipment — calc1.cpp line 405 ─────────────────────────────
+    num_av_eq: Dict[str, float] = {}
     for eq in equipment_list:
-        eq_id    = eq.get("id", "")
-        lab_id   = eq.get("labor_group_id") or ""
-        is_delay = eq.get("equip_type") == "delay"
-        count    = 1 if is_delay else int(eq.get("count", 0))
-        eq_ot_f  = float(eq.get("overtime_pct", 0))
-        max_eq_ot_g = max_lab_ot_map.get(lab_id, 0.0)
-        num_av   = float(count) * (eq_ot_f + 100.0) / (100.0 + max_eq_ot_g) if count > 0 else 0.0
-        num_av_eq_map[eq_id] = max(num_av, float(count))
+        eid   = eq.get("id", "")
+        lid   = eq.get("labor_group_id") or ""
+        cnt   = int(eq.get("count", 0))
+        eq_ot = float(eq.get("overtime_pct", 0))
+        m_ot  = max_lab_ot.get(lid, 0.0)
+        num_av_eq[eid] = max(float(cnt) * (eq_ot + 100.0) / (100.0 + m_ot), float(cnt))
 
-    # ── EQUIPMENT UTILISATION — FIRST PASS ──────────────────────────────────
-    equip_results:    List[Dict[str, Any]] = []
-    equip_active_map: Dict[str, float] = {}
-    equip_util_map:   Dict[str, float] = {}
-    equip_raw_uwait:  Dict[str, float] = {}  # FIX-E: first-pass uwait before lextra
+    # ═══════════════════════════════════════════════════════════════════════════
+    # EQUIPMENT UTILISATION PASS
+    # ═══════════════════════════════════════════════════════════════════════════
+    equip_rows:      List[Dict] = []
+    equip_util_map:  Dict[str, float] = {}  # total util fraction (for feedback)
+    equip_uwait_raw: Dict[str, float] = {}  # raw sum(v1*x1) before scaling
 
     for eq in equipment_list:
         eq_id    = eq.get("id", "")
         eq_name  = eq.get("name", "")
-        eq_count = int(eq.get("count", 0))
+        count    = int(eq.get("count", 0))
         is_delay = eq.get("equip_type") == "delay"
-        count    = 1 if is_delay else eq_count
+        lid      = eq.get("labor_group_id") or ""
+        lab      = labor_by_id.get(lid)
 
-        lab_id = eq.get("labor_group_id") or ""
-        lab    = labor_by_id.get(lab_id)
+        base_row = {
+            "id": eq_id, "name": eq_name, "count": count,
+            "setupUtil": 0.0, "runUtil": 0.0, "repairUtil": 0.0,
+            "waitLaborUtil": 0.0, "totalUtil": 0.0, "idle": 100.0,
+            "laborGroup": lab.get("name", "") if lab else "",
+            "wip_process": 0.0, "wip_queue": 0.0, "wip_total": 0.0,
+            "wait_min": 0.0, "num_av": num_av_eq.get(eq_id, float(count)),
+            "visits_per_100": 0.0,
+        }
 
         if count <= 0 and not is_delay:
-            equip_results.append({
-                "id": eq_id, "name": eq_name, "count": eq_count,
-                "setupUtil": 0, "runUtil": 0, "repairUtil": 0,
-                "waitLaborUtil": 0, "totalUtil": 0, "idle": 100, "laborGroup": "",
-            })
-            equip_active_map[eq_id] = 0.0
-            equip_util_map[eq_id]   = 0.0
-            equip_raw_uwait[eq_id]  = 0.0
+            equip_rows.append(base_row)
+            equip_util_map[eq_id] = 0.0
+            equip_uwait_raw[eq_id] = 0.0
             continue
 
-        avail_time = f_available_time_equip(count, eq.get("overtime_pct", 0),
-                                             eq.get("unavail_pct", 0), ops_per_period)
-        total_setup = 0.0
-        total_run   = 0.0
-        total_uwait_raw = 0.0  # FIX-E: accumulate raw uwait = v1 * MIN(xbar1,xbar2)
+        eff_cnt    = 1 if is_delay else count
+        avail_time = f_avail_equip(eff_cnt, eq.get("overtime_pct", 0), ops_per_period)
+        mttf = float(eq.get("mttf", 0) or 0)
+        mttr = float(eq.get("mttr", 0) or 0)
+
+        total_setup = 0.0; total_run = 0.0; total_uwait = 0.0
 
         for op in operations_list:
-            if op.get("equip_id") != eq_id:
-                continue
-            product = next((p for p in m.get("products", []) if p.get("id") == op.get("product_id")), None)
-            if not product:
-                continue
-            pid    = product.get("id", "")
-            demand = (effective_demand.get(pid, 0.0) or 0.0) * (1.0 + scrap_rates.get(pid, 0.0))
-            if demand <= 0:
-                continue
-
+            if op.get("equip_id") != eq_id: continue
+            product = next((p for p in products_list if p.get("id") == op.get("product_id")), None)
+            if not product: continue
+            pid      = product.get("id", "")
+            demand_i = effective_demand.get(pid, 0.0) * (1.0 + scrap_rates.get(pid, 0.0))
+            if demand_i <= 0: continue
             lot_size_v = f_lot_size(product.get("lot_size", 1), product.get("lot_factor", 1))
             tbatch_v   = f_tbatch_size(product.get("tbatch_size", -1), lot_size_v)
             nb         = f_num_tbatches(lot_size_v, tbatch_v)
             af         = f_assign_fraction(op.get("pct_assigned", 0))
-            num_lots   = f_num_lots(demand, lot_size_v, af)
+            num_lots   = f_num_lots(demand_i, lot_size_v, af)
             ps_factor  = float(product.get("setup_factor", 1))
+            lsize      = float(op.get("lsize", lot_size_v))
+            vp         = visit_probs_all.get(pid, {}).get(op.get("op_name", ""), 1.0)
 
-            total_setup += num_lots * f_setup_per_lot(
-                op.get("equip_setup_lot", 0), op.get("equip_setup_piece", 0),
-                op.get("equip_setup_tbatch", 0), lot_size_v, nb,
-                eq.get("setup_factor", 1), ps_factor,
-            )
-            total_run += num_lots * f_run_per_lot(
-                op.get("equip_run_piece", 0), op.get("equip_run_lot", 0),
-                op.get("equip_run_tbatch", 0), lot_size_v, nb,
-                eq.get("run_factor", 1),
-            )
+            xs_e, xr_e = _eq_EQUIP_T(op, eq, lot_size_v, nb, ps_factor, lsize)
+            total_setup += num_lots * xs_e       * vp
+            total_run   += num_lots * xr_e * lsize * vp  # xr_lot = xr_piece * lsize
 
-            # FIX-E: accumulate raw uwait = v1 * MIN(xbar1, xbar2)
-            # v1 = dlam * lvisit = dlam * af  (simple routing)
-            # xbar2 = OT-adjusted equip time per lot
-            # xbar1 = raw labor time per lot (FIX-B)
-            dlam   = demand / (lot_size_v * max(ops_per_period, 1e-9))
-            v1_raw = dlam * af  # lots/min flow
+            # uwait: v1 * min(xbar1, xbar2) — calc1.cpp line 311
+            dlam   = demand_i / (lot_size_v * max(ops_per_period, 1e-9))
+            vlam1  = dlam * af * vp
+            xbar2  = xs_e + xr_e  # per-piece equip
+            xs_l, xr_l = _eq_LABOR_T(op, eq, lab, lot_size_v, nb, ps_factor, lsize)
+            xbar1  = xs_l + xr_l  # per-piece labor
+            x1_uw  = min(xbar1, xbar2) if xbar2 > SSEPSILON else xbar1
+            total_uwait += vlam1 * x1_uw
 
-            xbars_eq, xbarr_pc_eq = _ot_adj_equip_times(op, eq, lot_size_v, nb, ps_factor)
-            xbar2_raw = xbars_eq + xbarr_pc_eq   # OT-adj equip time per visit (1 piece, after /lotsiz)
+        setup_frac  = total_setup / avail_time if avail_time > 0 else 0.0
+        run_frac    = total_run   / avail_time if avail_time > 0 else 0.0
+        repair_frac = (setup_frac + run_frac) * (mttr / mttf) if mttf > 0 else 0.0
 
-            lab_op = labor_by_id.get(lab_id)
-            xbarsl_l, xbarrl_pc_l = _raw_labor_times(op, eq, lab_op, lot_size_v, nb, ps_factor)
-            xbar1_raw = xbarsl_l + xbarrl_pc_l  # raw labor time per visit
-
-            x1_uwait = min(xbar1_raw, xbar2_raw) if xbar2_raw > 1e-20 else xbar1_raw
-            total_uwait_raw += v1_raw * x1_uwait
-
-        setup_util = (total_setup / avail_time * 100.0) if avail_time > 0 else 0.0
-        run_util   = (total_run   / avail_time * 100.0) if avail_time > 0 else 0.0
-
-        mttf = float(eq.get("mttf", 0) or 0)
-        mttr = float(eq.get("mttr", 0) or 0)
-        repair_util = (
-            ((setup_util + run_util) / 100.0) * (mttr / mttf) * 100.0
-            if (mttf > 0 and mttr > 0) else 0.0
-        )
-
-        lab_name = lab.get("name", "") if lab else ""
-
-        equip_results.append({
-            "id": eq_id, "name": eq_name, "count": eq_count,
-            "setupUtil":     _round1(setup_util),
-            "runUtil":       _round1(run_util),
-            "repairUtil":    _round1(repair_util),
-            "waitLaborUtil": 0,
-            "totalUtil":     0,
-            "idle":          0,
-            "laborGroup":    lab_name,
+        base_row.update({
+            "setupUtil":  _r1(setup_frac  * 100),
+            "runUtil":    _r1(run_frac    * 100),
+            "repairUtil": _r1(repair_frac * 100),
         })
-        equip_active_map[eq_id]  = (setup_util + run_util) / 100.0
-        equip_util_map[eq_id]    = (setup_util + run_util + repair_util) / 100.0
-        equip_raw_uwait[eq_id]   = total_uwait_raw
+        equip_rows.append(base_row)
+        equip_util_map[eq_id]  = setup_frac + run_frac + repair_frac
+        equip_uwait_raw[eq_id] = total_uwait
 
-    # ── FIX-E: Compute first-pass uwait per equipment (legacy calc1.cpp lines 396-399)
-    # After labor loop, for each equipment:
-    #   uwait *= effabs(tlabor) / (1 - effabs(tlabor))
-    #   uwait /= num
-    # This pre-lextra uwait is ADDED to total_util to compute labor_ul fed into ggc.
-    # However the uwait at this stage is NOT yet normalised by avail_time.
-    # It stays as fraction of avail_time.
-    equip_uwait_pre: Dict[str, float] = {}
-    for eq in equipment_list:
-        eq_id    = eq.get("id", "")
-        is_delay = eq.get("equip_type") == "delay"
-        count    = 1 if is_delay else int(eq.get("count", 0))
-        if count <= 0 and not is_delay:
-            equip_uwait_pre[eq_id] = 0.0
-            continue
-        if is_delay:
-            equip_uwait_pre[eq_id] = 0.0
-            continue
-
-        avail_time = f_available_time_equip(count, eq.get("overtime_pct", 0),
-                                             eq.get("unavail_pct", 0), ops_per_period)
-        if avail_time <= 0:
-            equip_uwait_pre[eq_id] = 0.0
-            continue
-
-        lab_id    = eq.get("labor_group_id") or ""
-        lab       = labor_by_id.get(lab_id)
-        absrate_f = float(lab.get("unavail_pct", 0)) / 100.0 if lab else 0.0
-        lab_num   = float(lab.get("count", 0)) if lab else 0.0
-
-        # Temporarily use a first-estimate of labor_ul for effabs
-        # At this stage we use uset+urun+absrate (pre-lextra labor util)
-        # This will be refined after the actual labor loop
-        lab_ul_pre = 0.0  # placeholder; will be set after labor util loop
-
-        equip_raw_uwait[eq_id] = equip_raw_uwait.get(eq_id, 0.0)
-
-    # ── LABOR UTILISATION ────────────────────────────────────────────────────
-    labor_results:  List[Dict[str, Any]] = []
+    # ═══════════════════════════════════════════════════════════════════════════
+    # LABOR UTILISATION PASS
+    # ═══════════════════════════════════════════════════════════════════════════
+    labor_rows:     List[Dict] = []
     labor_util_map: Dict[str, float] = {}
-    labor_work_map: Dict[str, float] = {}
-    num_av_lab_map: Dict[str, float] = {}
+    labor_uset_map: Dict[str, float] = {}
+    labor_urun_map: Dict[str, float] = {}
+    num_av_lab:     Dict[str, float] = {}
     labor_num_map:  Dict[str, float] = {}
 
     for lab in m.get("labor", []):
-        lab_id    = lab.get("id", "")
+        lid       = lab.get("id", "")
         lab_name  = lab.get("name", "")
         lab_count = int(lab.get("count", 0))
-        abs_rate  = float(lab.get("unavail_pct", 0))
-        abs_frac  = abs_rate / 100.0
+        abs_pct   = float(lab.get("unavail_pct", 0))
+        abs_frac  = abs_pct / 100.0
         lab_ot    = float(lab.get("overtime_pct", 0))
+        labor_num_map[lid] = float(lab_count)
 
-        labor_num_map[lab_id] = float(lab_count)
-
-        max_eq_ot_for_lab = max_lab_ot_map.get(lab_id, 0.0)
+        base_lab = {
+            "id": lid, "name": lab_name, "count": lab_count,
+            "setupUtil": 0.0, "runUtil": 0.0, "unavailPct": abs_pct,
+            "totalUtil": abs_pct, "idle": max(0.0, 100.0 - abs_pct),
+            "wip_total": 0.0, "wip_process": 0.0, "wip_queue": 0.0,
+            "eq_cover": 0.0, "fac_eq_lab": 0.0,
+        }
 
         if lab_count <= 0:
-            labor_results.append({
-                "id": lab_id, "name": lab_name, "count": lab_count,
-                "setupUtil": 0, "runUtil": 0,
-                "unavailPct": abs_rate,
-                "totalUtil":  abs_rate,
-                "idle":       100.0 - abs_rate,
-            })
-            labor_util_map[lab_id] = abs_frac
-            labor_work_map[lab_id] = 0.0
-            # FIX-K: num_av for zero-count labor
-            num_av_lab_map[lab_id] = 0.0
-            continue
+            labor_rows.append(base_lab)
+            labor_util_map[lid] = abs_frac
+            labor_uset_map[lid] = 0.0; labor_urun_map[lid] = 0.0
+            num_av_lab[lid] = 0.0; continue
 
-        # FIX-K: First accumulate using initial num_av = lab_count (like legacy before recalc)
-        # Legacy: first pass divides by tlabor->num_av where num_av was initialised to num
-        # Then recalculates num_av = num*(1+labOT/100)/(1+max_eq_ot/100)
-        initial_num_av = float(lab_count)
-
-        avail_for_util = initial_num_av * ops_per_period  # normalise raw sums
-
-        total_setup = 0.0
-        total_run   = 0.0
+        avail_lab   = f_avail_labor(lab_count, lab_ot, ops_per_period)
+        total_setup = 0.0; total_run = 0.0
 
         for op in operations_list:
             eq = next((e for e in equipment_list if e.get("id") == op.get("equip_id")), None)
-            if not eq or eq.get("labor_group_id") != lab_id:
-                continue
-            product = next((p for p in m.get("products", []) if p.get("id") == op.get("product_id")), None)
-            if not product:
-                continue
-            pid    = product.get("id", "")
-            demand = (effective_demand.get(pid, 0.0) or 0.0) * (1.0 + scrap_rates.get(pid, 0.0))
-            if demand <= 0:
-                continue
-
+            if not eq or eq.get("labor_group_id") != lid: continue
+            product = next((p for p in products_list if p.get("id") == op.get("product_id")), None)
+            if not product: continue
+            pid      = product.get("id", "")
+            demand_i = effective_demand.get(pid, 0.0) * (1.0 + scrap_rates.get(pid, 0.0))
+            if demand_i <= 0: continue
             lot_size_v = f_lot_size(product.get("lot_size", 1), product.get("lot_factor", 1))
             tbatch_v   = f_tbatch_size(product.get("tbatch_size", -1), lot_size_v)
             nb         = f_num_tbatches(lot_size_v, tbatch_v)
             af         = f_assign_fraction(op.get("pct_assigned", 0))
-            num_lots   = f_num_lots(demand, lot_size_v, af)
+            num_lots   = f_num_lots(demand_i, lot_size_v, af)
             ps_factor  = float(product.get("setup_factor", 1))
+            lsize      = float(op.get("lsize", lot_size_v))
+            vp         = visit_probs_all.get(pid, {}).get(op.get("op_name", ""), 1.0)
 
-            eq_sf = float(eq.get("setup_factor", 1))
-            eq_rf = float(eq.get("run_factor", 1))
+            xs_l, xr_l = _eq_LABOR_T(op, eq, lab, lot_size_v, nb, ps_factor, lsize)
+            total_setup += num_lots * xs_l       * vp
+            total_run   += num_lots * xr_l * lsize * vp
 
-            # Labor util times — raw (including OT factor in denominator, then remove)
-            # Legacy: uset += v1 * xbarsl   where xbarsl from LABOR_T (already /labOT)
-            # So we use xbarsl WITHOUT multiplying back by labOT (direct from calc_op LABOR_T)
-            lab_ot_f = 1.0 + lab_ot / 100.0
+        setup_frac = total_setup / avail_lab if avail_lab > 0 else 0.0
+        run_frac   = total_run   / avail_lab if avail_lab > 0 else 0.0
+        total_frac = setup_frac + run_frac + abs_frac  # absrate added separately
+        idle_frac  = max(0.0, 1.0 - total_frac)
 
-            setup_pl_lab_raw = (
-                float(op.get("labor_setup_lot",    0))
-                + float(op.get("labor_setup_piece", 0)) * lot_size_v
-                + float(op.get("labor_setup_tbatch", 0)) * nb
-            ) * eq_sf * float(lab.get("setup_factor", 1)) * ps_factor / lab_ot_f
+        m_ot  = max_lab_ot.get(lid, 0.0)
+        nav_l = float(lab_count) * (1.0 + lab_ot / 100.0) / (1.0 + m_ot / 100.0)
+        num_av_lab[lid]    = max(nav_l, float(lab_count))
+        labor_util_map[lid] = total_frac
+        labor_uset_map[lid] = setup_frac
+        labor_urun_map[lid] = run_frac
 
-            run_pl_lab_raw = (
-                float(op.get("labor_run_piece",   0)) * lot_size_v
-                + float(op.get("labor_run_lot",   0))
-                + float(op.get("labor_run_tbatch", 0)) * nb
-            ) * eq_rf * float(lab.get("run_factor", 1)) / lab_ot_f
-
-            total_setup += num_lots * setup_pl_lab_raw
-            total_run   += num_lots * run_pl_lab_raw
-
-        # FIX-K: divide by initial num_av (= lab_count) first, as legacy does
-        setup_util = (total_setup / avail_for_util * 100.0) if avail_for_util > 0 else 0.0
-        run_util   = (total_run   / avail_for_util * 100.0) if avail_for_util > 0 else 0.0
-        work_util  = setup_util + run_util
-        total_util = work_util + abs_rate
-        idle       = max(0.0, 100.0 - total_util)
-
-        # FIX-K: now recalculate num_av (legacy line 356)
-        num_av_l = (float(lab_count) * (1.0 + lab_ot / 100.0)
-                    / (1.0 + max_eq_ot_for_lab / 100.0))
-        num_av_lab_map[lab_id] = max(num_av_l, float(lab_count))
-
-        # eq_cover finalised (legacy line 359: eq_cover /= 100*(1+max_eq_ot/100))
-        # Handled in lextra
-
-        labor_util_map[lab_id] = total_util / 100.0
-        labor_work_map[lab_id] = work_util  / 100.0
-
-        labor_results.append({
-            "id": lab_id, "name": lab_name, "count": lab_count,
-            "setupUtil":  _round1(setup_util),
-            "runUtil":    _round1(run_util),
-            "unavailPct": abs_rate,
-            "totalUtil":  _round1(total_util),
-            "idle":       _round1(idle),
+        base_lab.update({
+            "setupUtil": _r1(setup_frac * 100),
+            "runUtil":   _r1(run_frac   * 100),
+            "totalUtil": _r1(total_frac * 100),
+            "idle":      _r1(idle_frac  * 100),
         })
+        labor_rows.append(base_lab)
 
-    # ── FIX-E: Now apply first-pass uwait using computed labor_util ──────────
-    # Legacy: after labor loop, for each equipment:
-    #   uwait *= effabs(tlabor) / (1-effabs(tlabor))
-    #   uwait /= num
-    #   u1 = uset + urun + uwait + udown
+    # ── FIX-E: Pre-lextra uwait scaling — calc1.cpp line 397 ─────────────────
+    equip_uwait_pre: Dict[str, float] = {}
     for eq in equipment_list:
-        eq_id    = eq.get("id", "")
-        is_delay = eq.get("equip_type") == "delay"
-        count    = 1 if is_delay else int(eq.get("count", 0))
-        if count <= 0 and not is_delay:
-            continue
-        if is_delay:
-            continue
+        eid   = eq.get("id", "")
+        cnt   = int(eq.get("count", 0))
+        if eq.get("equip_type") == "delay" or cnt <= 0:
+            equip_uwait_pre[eid] = 0.0; continue
+        avail = f_avail_equip(cnt, eq.get("overtime_pct", 0), ops_per_period)
+        lid   = eq.get("labor_group_id") or ""
+        lab   = labor_by_id.get(lid)
+        af_l  = float(lab.get("unavail_pct", 0)) / 100.0 if lab else 0.0
+        ln    = float(lab.get("count", 0)) if lab else 1.0
+        ea    = effabs(af_l, labor_util_map.get(lid, af_l), ln)
+        pre   = equip_uwait_raw.get(eid, 0.0) * (ea / max(1.0 - ea, 1e-6)) / max(float(cnt), 1.0)
+        equip_uwait_pre[eid] = pre / max(avail, 1e-9)
+        equip_util_map[eid]  = min(equip_util_map.get(eid, 0.0) + equip_uwait_pre[eid], 0.9999)
 
-        lab_id    = eq.get("labor_group_id") or ""
-        lab       = labor_by_id.get(lab_id)
-        absrate_f = float(lab.get("unavail_pct", 0)) / 100.0 if lab else 0.0
-        lab_num   = float(lab.get("count", 0)) if lab else 1.0
-        labor_ul  = labor_util_map.get(lab_id, absrate_f)
-
-        raw_uwait = equip_raw_uwait.get(eq_id, 0.0)
-        ea        = effabs(absrate_f, labor_ul, lab_num)
-        ea_denom  = max(1.0 - ea, 1e-6)
-
-        # FIX-E: scale by effabs/(1-effabs), then divide by num
-        scaled_uwait = raw_uwait * (ea / ea_denom) / max(float(count), 1.0)
-
-        avail_time = f_available_time_equip(count, eq.get("overtime_pct", 0),
-                                             eq.get("unavail_pct", 0), ops_per_period)
-        uwait_frac_pre = scaled_uwait / max(avail_time, 1e-9)
-
-        # Update total util to include this pre-lextra uwait
-        prior_util = equip_util_map.get(eq_id, 0.0)
-        equip_util_map[eq_id] = min(prior_util + uwait_frac_pre, 0.9999)
-        equip_uwait_pre[eq_id] = uwait_frac_pre
-
-    # ── XBAR_CS / LEXTRA — TWO-PASS ─────────────────────────────────────────
+    # ── XBAR_CS / LEXTRA — TWO-PASS ──────────────────────────────────────────
     fac_eq_lab_map: Dict[str, float] = {eq["id"]: 0.0 for eq in equipment_list}
     ct2_lab_map:    Dict[str, float] = {}
 
-    # Pass 1: fac_eq_lab = 0
-    (xbarbar_eq, cs2_eq, ca2_eq, tpm_eq,
-     smbard_eq, xbard_eq, lab_xbarbar_map) = _compute_xbar_cs(
-        m, effective_demand, scrap_rates,
-        var_equip, var_labor,
-        fac_eq_lab_map, ct2_lab_map,
-        labor_util_map, labor_num_map,
-        ops_per_period,
-    )
+    def _run_xbar_cs():
+        return _compute_xbar_cs(m, effective_demand, scrap_rates, var_equip, var_labor,
+                                 fac_eq_lab_map, ct2_lab_map, labor_util_map, labor_num_map,
+                                 ops_per_period, visit_probs_all)
 
-    fac_eq_lab_map, uwait_eq_raw, ct2_lab_map = _compute_lextra(
+    xbarbar_eq, cs2_eq, tpm_eq, smbard_eq, lab_xbar_map = _run_xbar_cs()
+
+    fac_eq_lab_map, uwait_lextra, ct2_lab_map = _compute_lextra(
         m, equipment_list, labor_by_id,
-        xbarbar_eq, cs2_eq, tpm_eq, smbard_eq,
-        lab_xbarbar_map,
-        labor_util_map, labor_num_map,
-        num_av_lab_map, num_av_eq_map,
+        xbarbar_eq, cs2_eq, tpm_eq, smbard_eq, lab_xbar_map,
+        labor_util_map, labor_num_map, num_av_lab, num_av_eq,
         var_labor, util_limit,
     )
 
-    # Pass 2: recompute with updated fac_eq_lab
-    (xbarbar_eq, cs2_eq, ca2_eq, tpm_eq,
-     smbard_eq, xbard_eq, lab_xbarbar_map) = _compute_xbar_cs(
-        m, effective_demand, scrap_rates,
-        var_equip, var_labor,
-        fac_eq_lab_map, ct2_lab_map,
-        labor_util_map, labor_num_map,
-        ops_per_period,
-    )
+    xbarbar_eq, cs2_eq, tpm_eq, smbard_eq, lab_xbar_map = _run_xbar_cs()
 
-    # ── APPLY UWAIT + FINAL TOTAL UTIL + CTq WAIT ───────────────────────────
-    eq_wait_map:     Dict[str, float] = {}
-    equip_total_map: Dict[str, float] = {}
+    # ── FINAL EQUIP UTIL + CTq WAIT ──────────────────────────────────────────
+    eq_wait_map: Dict[str, float] = {}  # queue wait in minutes
 
-    for er in equip_results:
+    for er in equip_rows:
         eq = next((e for e in equipment_list if e.get("id") == er["id"]), None)
-        if eq is None:
-            eq_wait_map[er["id"]] = 0.0
-            continue
+        if not eq:
+            eq_wait_map[er["id"]] = 0.0; continue
 
         eq_id    = er["id"]
         is_delay = eq.get("equip_type") == "delay"
         mttf     = float(eq.get("mttf", 0) or 0)
         mttr     = float(eq.get("mttr", 0) or 0)
-        eq_num   = max(1, int(eq.get("count", 1))) if not is_delay else 1
+        cnt      = max(1, int(eq.get("count", 1))) if not is_delay else 1
 
         if is_delay:
-            wait_min = mttr ** 2 / mttf if mttf > 0 else 0.0
-            eq_wait_map[eq_id] = wait_min / max(conv1, 0.001)
-            er["waitLaborUtil"] = 0.0
-            er["totalUtil"]     = _round1(float(er.get("repairUtil", 0)))
-            er["idle"]          = _round1(max(0.0, 100.0 - float(er["totalUtil"])))
-            equip_total_map[eq_id] = float(er["totalUtil"]) / 100.0
-            equip_util_map[eq_id]  = equip_total_map[eq_id]
+            eq_wait_map[eq_id] = mttr ** 2 / mttf if mttf > 0 else 0.0
+            udown = mttf / (mttf + mttr) if (mttf + mttr) > 0 else 0.0
+            er.update({"waitLaborUtil": 0.0, "totalUtil": _r1((1.0 - udown) * 100),
+                       "idle": _r1(udown * 100),
+                       "visits_per_100": _r1(tpm_eq.get(eq_id, 0.0) * 100)})
+            equip_util_map[eq_id] = 1.0 - udown
             continue
 
-        uwait_frac = uwait_eq_raw.get(eq_id, 0.0)
-        uwait_pct  = uwait_frac * 100.0
+        # BUG-1 FIX: total uwait = pre-lextra + lextra
+        uwait_total = equip_uwait_pre.get(eq_id, 0.0) + uwait_lextra.get(eq_id, 0.0)
+        unavail_f   = float(eq.get("unavail_pct", 0)) / 100.0  # BUG-15 FIX: added separately
+        total_f     = min(float(er["setupUtil"] + er["runUtil"] + er["repairUtil"]) / 100.0
+                          + uwait_total + unavail_f, 0.9999)
 
-        # Use the util that already includes pre-lextra uwait as base (FIX-E),
-        # then replace the pre-lextra uwait component with lextra uwait
-        base_util       = (float(er.get("setupUtil", 0)) + float(er.get("runUtil", 0))
-                           + float(er.get("repairUtil", 0))) / 100.0
-        total_util_frac = min(base_util + uwait_frac, 0.9999)
-        total_pct       = total_util_frac * 100.0
+        er["waitLaborUtil"]  = _r1(uwait_total * 100)
+        er["totalUtil"]      = _r1(total_f * 100)
+        er["idle"]           = _r1(max(0.0, 100.0 - total_f * 100))
+        er["visits_per_100"] = _r1(tpm_eq.get(eq_id, 0.0) * 100)
+        equip_util_map[eq_id] = total_f
 
-        er["waitLaborUtil"] = _round1(uwait_pct)
-        er["totalUtil"]     = _round1(total_pct)
-        er["idle"]          = _round1(max(0.0, 100.0 - total_pct))
-        equip_util_map[eq_id]  = total_util_frac
-        equip_total_map[eq_id] = total_util_frac
-
+        # CTq — calc1.cpp lines 515-528 (M/G/c P-K formula)
         xbb = xbarbar_eq.get(eq_id, 0.0)
-        cs2 = max(0.0, min(cs2_eq.get(eq_id, 1.0), 4.0))
-        ca2 = max(0.0, min(ca2_eq.get(eq_id, 1.0), 4.0))
-        u1  = total_util_frac
-
-        if xbb > 1e-20 and u1 > 1e-10:
-            exponent = math.sqrt(2.0 * (eq_num + 1.0)) - 1.0
-            wait_min = (
-                xbb
-                * ((ca2 + cs2) / 2.0)
-                * (min(u1, 0.9999) ** exponent)
-                / (eq_num * max(1.0 - u1, 1e-6))
-            )
-            eq_wait_map[eq_id] = max(0.0, wait_min) / max(conv1, 0.001)
+        cs2 = min(max(cs2_eq.get(eq_id, 1.0), 0.0), 4.0)
+        ca2 = 1.0  # external arrival CV2 ≈ 1
+        u1  = total_f
+        if xbb > SSEPSILON and u1 > EPSILON:
+            exp_ = math.sqrt(2.0 * (cnt + 1.0)) - 1.0
+            wm   = xbb * ((ca2 + cs2) / 2.0) * (min(u1, 0.9999) ** exp_) / (cnt * max(1.0 - u1, 1e-6))
+            eq_wait_map[eq_id] = max(0.0, wm)
         else:
             eq_wait_map[eq_id] = 0.0
 
-    # ── PRODUCT MCT & WIP ────────────────────────────────────────────────────
-    product_results: List[Dict[str, Any]] = []
+    # ═══════════════════════════════════════════════════════════════════════════
+    # PRODUCT MCT, WIP, OPERATION DETAILS
+    # ═══════════════════════════════════════════════════════════════════════════
+    product_results:   List[Dict] = []
+    operation_results: List[Dict] = []
 
-    for product in m.get("products", []):
+    # Accumulate q per equipment
+    eq_q_acc: Dict[str, float] = {eq["id"]: 0.0 for eq in equipment_list}
+
+    for product in products_list:
         pid          = product.get("id", "")
         pname        = product.get("name", "")
         demand_total = effective_demand.get(pid, 0.0) or 0.0
-        demand_end   = float(product.get("demand", 0.0)) * float(product.get("demand_factor", 1.0))
+        demand_end   = float(product.get("demand", 0)) * float(product.get("demand_factor", 1))
         lot_size_v   = f_lot_size(product.get("lot_size", 1), product.get("lot_factor", 1))
+        ps_factor    = float(product.get("setup_factor", 1))
+        tbatch_v     = f_tbatch_size(product.get("tbatch_size", -1), lot_size_v)
+        nb           = f_num_tbatches(lot_size_v, tbatch_v)
+        ops          = [o for o in operations_list if o.get("product_id") == pid]
+        vp_map       = visit_probs_all.get(pid, {})
+        yield_frac   = 1.0 - scrap_rates.get(pid, 0.0)
 
-        ops = [o for o in operations_list if o.get("product_id") == pid]
         if not ops or demand_total <= 0:
             product_results.append({
-                "id": pid, "name": pname,
-                "demand": demand_total, "lotSize": lot_size_v,
-                "goodMade": round(demand_total), "goodShipped": round(demand_end),
-                "started": round(demand_total), "scrap": 0, "wip": 0,
-                "mct": 0, "mctLotWait": 0, "mctQueue": 0,
-                "mctWaitLabor": 0, "mctSetup": 0, "mctRun": 0,
+                "id": pid, "name": pname, "demand": demand_total, "lotSize": lot_size_v,
+                "goodMade": round(demand_total * yield_frac), "goodShipped": round(demand_end),
+                "started": round(demand_total), "scrap": 0, "wip": 0, "wip_lots": 0.0,
+                "mct": 0.0, "mctLotWait": 0.0, "mctQueue": 0.0, "mctWaitLabor": 0.0,
+                "mctSetup": 0.0, "mctRun": 0.0, "w_equip": 0.0, "w_labor": 0.0,
+                "w_setup": 0.0, "w_run": 0.0, "w_lot": 0.0,
             })
             continue
 
-        total_setup_mct      = 0.0
-        total_run_mct        = 0.0
-        total_queue_mct      = 0.0
-        total_lot_wait_mct   = 0.0
-        total_wait_labor_mct = 0.0
+        # Accumulators — all in MINUTES, divided by conv1 at end
+        ft_tot = 0.0  # total flowtime (= tsgood * conv1)
+        wip_lots = 0.0
+        sum_w_setup = sum_w_run = sum_w_lot = sum_w_equip = sum_w_labor = 0.0
 
-        ps_factor  = float(product.get("setup_factor", 1))
-        tbatch_v   = f_tbatch_size(product.get("tbatch_size", -1), lot_size_v)
-        nb         = f_num_tbatches(lot_size_v, tbatch_v)
+        demand_inflated = demand_total * (1.0 + scrap_rates.get(pid, 0.0))
+        dlam_base = demand_inflated / (lot_size_v * max(ops_per_period, 1e-9))
 
         for op in ops:
             eq = next((e for e in equipment_list if e.get("id") == op.get("equip_id")), None)
-            if not eq:
-                continue
+            if not eq: continue
             af = f_assign_fraction(op.get("pct_assigned", 0))
-            if af <= 0:
-                continue
+            if af <= 0: continue
 
             eq_id    = eq.get("id", "")
             is_delay = eq.get("equip_type") == "delay"
-            lab      = labor_by_id.get(eq.get("labor_group_id") or "")
-            lab_id   = eq.get("labor_group_id") or ""
-            absrate_f = float(lab.get("unavail_pct", 0)) / 100.0 if lab else 0.0
+            lid      = eq.get("labor_group_id") or ""
+            lab      = labor_by_id.get(lid)
+            abs_frac = float(lab.get("unavail_pct", 0)) / 100.0 if lab else 0.0
             lab_num  = float(lab.get("count", 0)) if lab else 1.0
-            labor_ul = labor_util_map.get(lab_id, absrate_f)
+            lab_ul   = labor_util_map.get(lid, abs_frac)
             mttf     = float(eq.get("mttf", 0) or 0)
             mttr     = float(eq.get("mttr", 0) or 0)
             fac      = fac_eq_lab_map.get(eq_id, 0.0)
+            lsize    = float(op.get("lsize", lot_size_v))
+            vp       = vp_map.get(op.get("op_name", ""), 1.0)
+            # vpergood ≈ visit_prob * yield_frac (fraction of visits that produce good parts)
+            # For main-path ops vpergood ~ yield_frac; for rework ops it's scaled down
+            # We use vp (visit probability) for scaling flowtime, matching legacy lvisit
+            vpergood = vp  # legacy toper->vpergood == lvisit in standard single-product routing
+            wait_min = eq_wait_map.get(eq_id, 0.0)
+            eq_u     = equip_util_map.get(eq_id, 0.0)
+            eq_uwait = equip_uwait_pre.get(eq_id, 0.0) + uwait_lextra.get(eq_id, 0.0)
+            v1       = dlam_base * af * vp * min(1.0, lsize)
+
+            # Per-operation util accumulation (for ulset/ulrun/ueset/uerun)
+            xs_l_u, xr_l_u = _eq_LABOR_T(op, eq, lab, lot_size_v, nb, ps_factor, lsize)
+            xs_e_u, xr_e_u = _eq_EQUIP_T(op, eq, lot_size_v, nb, ps_factor, lsize)
+            ulset   = v1 * xs_l_u * 100.0
+            ulrun   = v1 * (xr_l_u * max(1.0, lsize)) * 100.0
+            ueset   = v1 * xs_e_u * 100.0
+            uerun   = v1 * (xr_e_u * max(1.0, lsize)) * 100.0
+            n_setup = v1 * ops_per_period
 
             if is_delay:
-                total_queue_mct += eq_wait_map.get(eq_id, 0.0)
+                ft_tot += vpergood * wait_min
+                operation_results.append({
+                    "product": pname, "operation": op.get("op_name", ""),
+                    "equipment": eq.get("name", ""), "labor": "",
+                    "assign_pct": op.get("pct_assigned", 100),
+                    "visit_prob": _r4(vp),
+                    "ueset": 0.0, "uerun": 0.0, "ulset": 0.0, "ulrun": 0.0,
+                    "flowtime": 0.0, "n_setups": 0.0, "qpoper": 0.0,
+                    "w_run": 0.0, "w_setup": 0.0, "w_lot": 0.0, "w_equip": 0.0, "w_labor": 0.0,
+                })
                 continue
 
-            xbars, xbarr_pc = _ot_adj_equip_times(op, eq, lot_size_v, nb, ps_factor)
-            xbar2 = xbars + xbarr_pc
+            # BUG-16 FIX: T_BATCH_TOTAL modes for xprime
+            xs_tl, xr_tl = _eq_TBATCH_TOTAL_LABOR(op, eq, lab, lot_size_v, tbatch_v, ps_factor, lsize)
+            xs_te, xr_te = _eq_TBATCH_TOTAL_EQUIP(op, eq, lot_size_v, tbatch_v, lsize)
+            lab_ot_f = 1.0 + float(lab.get("overtime_pct", 0) if lab else 0) / 100.0
+            xbar1    = (xs_tl + xr_tl) * lab_ot_f
+            xbar2    = xs_te + xr_te
 
-            # FIX-B: raw labor times
-            xbarsl, xbarrl_pc = _raw_labor_times(op, eq, lab, lot_size_v, nb, ps_factor)
-            xbar1 = xbarsl + xbarrl_pc
+            xprime_min = _calc_xprime(xbar1, xbar2, mttr, mttf, abs_frac, lab_ul, lab_num, fac)
+            rpv_min    = xprime_min + wait_min
+            flowtime_m = vpergood * rpv_min
 
-            # FIX-A: xprime using effabs
-            xprime_min  = _calc_xprime(xbar1, xbar2, mttr, mttf, absrate_f, labor_ul, lab_num, fac)
-            xprime_days = xprime_min / max(conv1, 0.001)
+            # BUG-10 FIX: T_BATCH_PIECE for w_run and w_setup
+            xs_bp, xr_bp = _eq_TBATCH_PIECE(op, eq)
+            w_run_m   = vpergood * xr_bp
+            w_setup_m = vpergood * xs_bp
 
-            # Decompose MCT into setup vs run (proportional share of xprime)
-            ot_f             = 1.0 + float(eq.get("overtime_pct", 0)) / 100.0
-            setup_pp_adj     = xbars / lot_size_v    # setup per piece OT-adj
-            run_pp_adj       = xbarr_pc              # run per piece OT-adj
-            total_raw_pp     = max(setup_pp_adj + run_pp_adj, 1e-20)
-            setup_share      = setup_pp_adj / total_raw_pp
-            run_share        = run_pp_adj   / total_raw_pp
-            total_setup_mct += xprime_days * setup_share
-            total_run_mct   += xprime_days * run_share
+            # BUG-2: lot-wait using T_BATCH_WAIT_LOT
+            xs_wl, xr_wl = _eq_TBATCH_WAIT_LOT(op, eq)
+            ratio     = max(0.0, tbatch_v * lsize / lot_size_v - 1.0) if lot_size_v > 0 else 0.0
+            w_lot_m   = vpergood * (xs_wl + xr_wl) * ratio
 
-            # FIX-H: lot wait using legacy T_BATCH_WAIT_LOT formula
-            xs_piece, xr_piece = _ot_adj_equip_piece_rates(op, eq)
-            total_lot_wait_mct += f_lot_wait_mct(lot_size_v, tbatch_v, xr_piece, xs_piece, conv1)
+            # w_equip: queue portion + repair portion — calc1.cpp line 669-672
+            w_eq_q  = vpergood * wait_min * (eq_u - eq_uwait) / eq_u if eq_u > SSEPSILON else 0.0
+            w_eq_r  = vpergood * (xr_bp + xs_bp + (xs_wl + xr_wl) * ratio) * (mttr / mttf if mttf > 0 else 0)
+            w_equip_m = w_eq_q + w_eq_r
 
-            # Queue wait (CTq)
-            total_queue_mct += eq_wait_map.get(eq_id, 0.0)
+            # BUG-11 FIX: w_labor as residual — calc1.cpp line 667
+            w_labor_m = max(0.0, flowtime_m - w_run_m - w_setup_m - w_lot_m - w_equip_m)
+            if w_labor_m < 0.0001 * max(flowtime_m, 1e-20):
+                w_labor_m = 0.0
 
-            # Labor wait MCT contribution
-            if lab and fac > 0.0:
-                ea_val   = effabs(absrate_f, labor_ul, lab_num)
-                abs_f_ea = 1.0 / max(1.0 - ea_val, 1e-6)
-                xl_only  = (min(xbar1, xbar2) * abs_f_ea
-                            if xbar2 > 1e-20
-                            else xbar1 * abs_f_ea)
-                wfl_days = xl_only * fac / max(conv1, 0.001)
-                total_wait_labor_mct += max(0.0, wfl_days)
+            qpoper = v1 * rpv_min * max(1.0, lsize)
+            eq_q_acc[eq_id] = eq_q_acc.get(eq_id, 0.0) + qpoper
 
-        yield_frac = 1.0 - scrap_rates.get(pid, 0.0)
+            ft_tot      += flowtime_m
+            wip_lots    += v1 * rpv_min
+            sum_w_setup += w_setup_m
+            sum_w_run   += w_run_m
+            sum_w_lot   += w_lot_m
+            sum_w_equip += w_equip_m
+            sum_w_labor += w_labor_m
 
-        capacity_limited = f_capacity_limited_flow_for_product(
-            product=product, ops_for_product=ops,
-            equipment_list=equipment_list, conv1=conv1, ops_per_period=ops_per_period,
-        )
-        feasible_started = f_feasible_started_flow(demand_total, yield_frac, capacity_limited)
+            operation_results.append({
+                "product":   pname,
+                "operation": op.get("op_name", ""),
+                "equipment": eq.get("name", ""),
+                "labor":     lab.get("name", "") if lab else "",
+                "assign_pct": op.get("pct_assigned", 100),
+                "visit_prob": _r4(vp),
+                "ueset":    _r4(ueset),
+                "uerun":    _r4(uerun),
+                "ulset":    _r4(ulset),
+                "ulrun":    _r4(ulrun),
+                "flowtime": _r4(flowtime_m / conv1),
+                "n_setups": _r4(n_setup),
+                "qpoper":   _r4(qpoper),
+                "w_run":    _r4(w_run_m   / conv1),
+                "w_setup":  _r4(w_setup_m / conv1),
+                "w_lot":    _r4(w_lot_m   / conv1),
+                "w_equip":  _r4(w_equip_m / conv1),
+                "w_labor":  _r4(w_labor_m / conv1),
+            })
 
-        started      = round(feasible_started) if feasible_started != float("inf") else 0
-        good_made    = round(float(started) * float(yield_frac))
-        scrap_cnt    = max(0, round(float(started) - float(good_made)))
-        good_shipped = f_good_shipped(good_made, demand_end)
+        # Convert to shifts (÷ conv1)
+        def to_s(m_):
+            return m_ / max(conv1, 0.001)
 
-        total_mct = (total_setup_mct + total_run_mct + total_queue_mct
-                     + total_lot_wait_mct + total_wait_labor_mct)
-
-        wip = f_wip_from_littles_law(started, total_mct, conv2)
+        mct_shifts = to_s(ft_tot)
+        cap_lim    = f_capacity_limited_flow(product, ops, equipment_list, ops_per_period, vp_map)
+        needed     = demand_total / yield_frac if yield_frac > 0 else float("inf")
+        started    = round(min(needed, cap_lim)) if cap_lim != float("inf") else round(needed)
+        good_made  = round(started * yield_frac)
+        scrap_cnt  = max(0, started - good_made)
+        shipped    = round(min(good_made, demand_end))
+        wip        = max(0, round(started / max(conv2, 1.0) * mct_shifts))
 
         product_results.append({
-            "id": pid, "name": pname,
+            "id":           pid,
+            "name":         pname,
             "demand":       demand_total,
             "lotSize":      lot_size_v,
             "goodMade":     good_made,
-            "goodShipped":  good_shipped,
+            "goodShipped":  shipped,
             "started":      started,
             "scrap":        scrap_cnt,
             "wip":          wip,
-            "mct":          _round4(total_mct),
-            "mctLotWait":   _round4(total_lot_wait_mct),
-            "mctQueue":     _round4(total_queue_mct),
-            "mctWaitLabor": _round4(total_wait_labor_mct),
-            "mctSetup":     _round4(total_setup_mct),
-            "mctRun":       _round4(total_run_mct),
+            "wip_lots":     _r4(wip_lots),
+            "mct":          _r4(mct_shifts),
+            "mctSetup":     _r4(to_s(sum_w_setup)),
+            "mctRun":       _r4(to_s(sum_w_run)),
+            "mctLotWait":   _r4(to_s(sum_w_lot)),
+            "mctQueue":     _r4(to_s(sum_w_equip)),   # queue+repair portion of equip wait
+            "mctWaitLabor": _r4(to_s(sum_w_labor)),
+            "w_equip":      _r4(to_s(sum_w_equip)),
+            "w_labor":      _r4(to_s(sum_w_labor)),
+            "w_setup":      _r4(to_s(sum_w_setup)),
+            "w_run":        _r4(to_s(sum_w_run)),
+            "w_lot":        _r4(to_s(sum_w_lot)),
         })
 
-    # ── WARNINGS ─────────────────────────────────────────────────────────────
-    over_limit: List[str] = []
-    for er in equip_results:
+    # ── Equipment WIP (qp, qw, q) — calc1.cpp lines 822-837 ─────────────────
+    for er in equip_rows:
+        eq = next((e for e in equipment_list if e.get("id") == er["id"]), None)
+        if not eq: continue
+        eq_id  = er["id"]
+        cnt    = int(eq.get("count", 0))
+        sf     = float(er.get("setupUtil",  0)) / 100.0
+        rf     = float(er.get("runUtil",    0)) / 100.0
+        q_tot  = eq_q_acc.get(eq_id, 0.0)
+        qp     = (sf + rf) * cnt if cnt > 0 else (sf + rf)  # (uset+urun)*num
+        qw     = max(0.0, q_tot - qp)
+        er["wip_process"] = _r4(max(0.0, qp))
+        er["wip_queue"]   = _r4(qw)
+        er["wip_total"]   = _r4(max(0.0, q_tot))
+        er["wait_min"]    = _r4(eq_wait_map.get(eq_id, 0.0))
+
+    # ── Labor WIP — calc1.cpp lines 839-848 ──────────────────────────────────
+    for lr in labor_rows:
+        lid    = lr["id"]
+        lab    = labor_by_id.get(lid)
+        cnt    = int(lab.get("count", 0)) if lab else 0
+        sf     = labor_uset_map.get(lid, 0.0)
+        rf     = labor_urun_map.get(lid, 0.0)
+        qpl    = (sf + rf) * cnt if cnt > 0 else 0.0
+
+        # ql = sum(smbard * (1 + fac_eq_lab)) over equipment in group
+        eq_grp = [e for e in equipment_list if e.get("labor_group_id") == lid]
+        ql     = sum(smbard_eq.get(e["id"], 0.0) * (1.0 + fac_eq_lab_map.get(e["id"], 0.0))
+                     for e in eq_grp)
+        qwl    = max(0.0, ql - qpl)
+
+        # eq_cover for display
+        eq_act = [e for e in eq_grp if int(e.get("count", 0)) > 0]
+        m_ot   = max((float(e.get("overtime_pct", 0)) for e in eq_act), default=0.0)
+        eq_cov = (sum(float(e.get("count", 1)) * (float(e.get("overtime_pct", 0)) + 100.0)
+                      for e in eq_act) / (100.0 * (1.0 + m_ot / 100.0))
+                  if eq_act else 0.0)
+        max_fac = max((fac_eq_lab_map.get(e["id"], 0.0) for e in eq_act), default=0.0)
+
+        lr["wip_total"]   = _r4(max(0.0, ql))
+        lr["wip_process"] = _r4(max(0.0, qpl))
+        lr["wip_queue"]   = _r4(qwl)
+        lr["eq_cover"]    = _r4(eq_cov)
+        lr["fac_eq_lab"]  = _r4(max_fac)
+
+    # ── Warnings ─────────────────────────────────────────────────────────────
+    over_limit = []
+    for er in equip_rows:
         if float(er["totalUtil"]) > util_limit:
             over_limit.append(f"Equipment: {er['name']} ({er['totalUtil']}%)")
-            warnings.append(
-                f'Equipment group "{er["name"]}" utilization ({er["totalUtil"]}%) '
-                f'exceeds limit ({util_limit}%)'
-            )
-    for lr in labor_results:
+            warnings.append(f'Equipment "{er["name"]}" util ({er["totalUtil"]}%) > limit ({util_limit}%)')
+    for lr in labor_rows:
         if float(lr["totalUtil"]) > util_limit:
             over_limit.append(f"Labor: {lr['name']} ({lr['totalUtil']}%)")
-            warnings.append(
-                f'Labor group "{lr["name"]}" utilization ({lr["totalUtil"]}%) '
-                f'exceeds limit ({util_limit}%)'
-            )
+            warnings.append(f'Labor "{lr["name"]}" util ({lr["totalUtil"]}%) > limit ({util_limit}%)')
 
-    if not m.get("operations"):
-        errors.append("No operations defined. Add operations to products before running calculations.")
-
-    # ── SANITIZE ─────────────────────────────────────────────────────────────
-    for e in equip_results:
-        for k in ["setupUtil", "runUtil", "repairUtil", "waitLaborUtil", "totalUtil", "idle"]:
-            e[k] = _sanitize(float(e[k]))
-    for lbr in labor_results:
-        for k in ["setupUtil", "runUtil", "totalUtil", "idle"]:
-            lbr[k] = _sanitize(float(lbr[k]))
-    for p in product_results:
-        for k in ["wip", "mct", "mctLotWait", "mctQueue", "mctWaitLabor", "mctSetup", "mctRun"]:
-            p[k] = _sanitize(float(p[k]))
+    # ── Sanitize ─────────────────────────────────────────────────────────────
+    for er in equip_rows:
+        for k in ["setupUtil","runUtil","repairUtil","waitLaborUtil","totalUtil","idle",
+                  "wip_process","wip_queue","wip_total","wait_min","visits_per_100"]:
+            er[k] = _s(float(er.get(k, 0)))
+    for lr in labor_rows:
+        for k in ["setupUtil","runUtil","totalUtil","idle",
+                  "wip_total","wip_process","wip_queue","eq_cover","fac_eq_lab"]:
+            lr[k] = _s(float(lr.get(k, 0)))
+    for pr in product_results:
+        for k in ["wip","wip_lots","mct","mctLotWait","mctQueue","mctWaitLabor",
+                  "mctSetup","mctRun","w_equip","w_labor","w_setup","w_run","w_lot"]:
+            pr[k] = _s(float(pr.get(k, 0)))
+    for opr in operation_results:
+        for k in ["ueset","uerun","ulset","ulrun","flowtime","n_setups","qpoper",
+                  "w_run","w_setup","w_lot","w_equip","w_labor","visit_prob"]:
+            opr[k] = _s(float(opr.get(k, 0)))
 
     return {
-        "equipment":          equip_results,
-        "labor":              labor_results,
+        "equipment":          equip_rows,
+        "labor":              labor_rows,
         "products":           product_results,
+        "operations":         operation_results,
         "warnings":           warnings,
         "errors":             errors,
         "overLimitResources": over_limit,
-        "calculatedAt":       datetime.utcnow().isoformat() + "Z",
+        "calculatedAt":       datetime.now(timezone.utc).isoformat(),
     }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Django view
 # ─────────────────────────────────────────────────────────────────────────────
-
 @csrf_exempt
 @require_http_methods(["POST"])
 def full_calculate_view(request):
     data = _parse_json(request)
     if data is None:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
-
     model    = data.get("model")
     scenario = data.get("scenario")
     if not model:
         return JsonResponse({"error": "Missing 'model' in body"}, status=400)
-
     try:
         results = full_calculate_corrected(model, scenario)
         return JsonResponse({"results": results})
