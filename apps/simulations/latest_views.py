@@ -1267,7 +1267,7 @@ def full_calculate_corrected(model, scenario=None):
             ueset   = v1 * xs_e_u * 100.0
             uerun   = v1 * (xr_e_u * max(1.0, lsize)) * 100.0
             n_setup = v1 * ops_per_period
-
+            print("verp: ", vpergood )
             if is_delay:
                 ft_tot += vpergood * wait_min
                 operation_results.append({
