@@ -182,7 +182,7 @@ def _eq_EQUIP_T(op, eq, lot_size_v, nb, ps_factor, lsize=None):
     xs = (float(op.get("equip_setup_lot",    0))
           + float(op.get("equip_setup_tbatch", 0)) * nb
           + float(op.get("equip_setup_piece",  0)) * lsize
-         ) * sf * ps_factor / ot
+         ) * sf / ot
     xr_lot = (float(op.get("equip_run_lot",    0))
               + float(op.get("equip_run_tbatch", 0)) * nb
               + float(op.get("equip_run_piece",  0)) * lsize
@@ -202,7 +202,7 @@ def _eq_LABOR_T(op, eq, lab, lot_size_v, nb, ps_factor, lsize=None):
     xs = (float(op.get("labor_setup_lot",    0))
           + float(op.get("labor_setup_tbatch", 0)) * nb
           + float(op.get("labor_setup_piece",  0)) * lsize
-         ) * esf * lsf * ps_factor / lab_ot
+         ) * esf * lsf / lab_ot
     xr_lot = (float(op.get("labor_run_lot",    0))
               + float(op.get("labor_run_tbatch", 0)) * nb
               + float(op.get("labor_run_piece",  0)) * lsize
@@ -225,7 +225,7 @@ def _labor_no_OT(op, eq, lab, lot_size_v, nb, ps_factor, lsize=None):
     xs = (float(op.get("labor_setup_lot",    0))
           + float(op.get("labor_setup_tbatch", 0)) * nb
           + float(op.get("labor_setup_piece",  0)) * lsize
-         ) * esf * lsf * ps_factor
+         ) * esf * lsf
     xr_lot = (float(op.get("labor_run_lot",    0))
               + float(op.get("labor_run_tbatch", 0)) * nb
               + float(op.get("labor_run_piece",  0)) * lsize
@@ -271,7 +271,7 @@ def _eq_TBATCH_TOTAL_LABOR(op, eq, lab, lot_size_v, tbatch_v, ps_factor, lsize=N
     xs  = (float(op.get("labor_setup_lot",    0))
            + float(op.get("labor_setup_tbatch", 0))
            + float(op.get("labor_setup_piece",  0)) * tbs
-          ) * esf * lsf * ps_factor / lab_ot
+          ) * esf * lsf / lab_ot
     xr  = (float(op.get("labor_run_lot",    0))
            + float(op.get("labor_run_tbatch", 0))
            + float(op.get("labor_run_piece",  0)) * tbs
@@ -593,7 +593,7 @@ def _ggc_wait(labor_ul: float, num_av: float, xbarbar: float, ca2: float, cs2: f
 def _compute_lextra(m, equipment_list, labor_by_id, xbarbar_eq, cs2_eq,
                     tpm_eq, smbard_eq, lab_xbarbar_map,
                     labor_util_map, labor_num_map, num_av_lab_map, num_av_eq_map,
-                    var_labor, utlimit):
+                    var_labor, utlimit, equip_uwait_pre):
     fac_eq_lab_map: Dict[str, float] = {eq["id"]: 0.0 for eq in equipment_list}
     uwait_lextra:   Dict[str, float] = {eq["id"]: 0.0 for eq in equipment_list}
     ct2_lab_map:    Dict[str, float] = {}
@@ -637,8 +637,10 @@ def _compute_lextra(m, equipment_list, labor_by_id, xbarbar_eq, cs2_eq,
             for e in eq_grp:
                 eid = e["id"]; nav = num_av_eq_map.get(eid, float(e.get("count", 1)))
                 fac_eq_lab_map[eid] = fac_g
-                if nav > SSEPSILON:
+                if int(e.get("count", 0)) > 0 and nav > SSEPSILON:
                     uwait_lextra[eid] = (fac_g * smbard_eq.get(eid, 0.0)) / nav
+                else:
+                    uwait_lextra[eid] = 0.0
 
         # Branch 3: normal G/G/c
         else:
@@ -675,9 +677,15 @@ def _compute_lextra(m, equipment_list, labor_by_id, xbarbar_eq, cs2_eq,
             for e in eq_grp:
                 eid = e["id"]; nav = num_av_eq_map.get(eid, float(e.get("count", 1)))
                 fac_eq_lab_map[eid] = fac_g
-                if nav > SSEPSILON:
-                    uwait_lextra[eid] = (1.0 if labor_ul > 0.95
-                                         else (fac_g * smbard_eq.get(eid, 0.0)) / nav)
+                if int(e.get("count", 0)) > 0:
+                    if labor_ul > 0.95:
+                        uwait_lextra[eid] = max(0.0, 1.0 - equip_uwait_pre.get(eid, 0.0))
+                    elif nav > SSEPSILON:
+                        uwait_lextra[eid] = (fac_g * smbard_eq.get(eid, 0.0)) / nav
+                    else:
+                        uwait_lextra[eid] = 0.0
+                else:
+                    uwait_lextra[eid] = 0.0
 
     return fac_eq_lab_map, uwait_lextra, ct2_lab_map
 
@@ -824,7 +832,7 @@ def full_calculate_corrected(model, scenario=None):
         cnt   = int(eq.get("count", 0))
         eq_ot = float(eq.get("overtime_pct", 0))
         m_ot  = max_lab_ot.get(lid, 0.0)
-        num_av_eq[eid] = max(float(cnt) * (eq_ot + 100.0) / (100.0 + m_ot), float(cnt))
+        num_av_eq[eid] = float(cnt) * (eq_ot + 100.0) / (100.0 + m_ot)
 
     # ═══════════════════════════════════════════════════════════════════════════
     # EQUIPMENT UTILISATION PASS
@@ -846,8 +854,10 @@ def full_calculate_corrected(model, scenario=None):
         eq_raw_uwait[eq_id] = 0.0
 
     # Labor raw accumulator maps
+    # Labor raw accumulator maps
     lab_raw_uset: Dict[str, float] = {}  # Σ v1*xbarsl
     lab_raw_urun: Dict[str, float] = {}  # Σ v1*xbarrl_lot
+    lab_qpl:      Dict[str, float] = {}  # Σ v1*x1_uw — calc1.cpp line 322  # Σ v1*xbarrl_lot
 
     for op in operations_list:
         eq = next((e for e in equipment_list if e.get("id") == op.get("equip_id")), None)
@@ -908,6 +918,7 @@ def full_calculate_corrected(model, scenario=None):
         # Labor accumulators (calc1.cpp lines 301-302)
         lab_raw_uset[lid] = lab_raw_uset.get(lid, 0.0) + v1 * xs_l
         lab_raw_urun[lid] = lab_raw_urun.get(lid, 0.0) + v1 * xbarrl_lot_l
+        lab_qpl[lid]      = lab_qpl.get(lid, 0.0)      + v1 * x1_uw   # calc1.cpp line 322: tlabor->qpl += v1*x1
 
     # ── Normalise equip util and build equip_rows ──────────────────────────
     for eq in equipment_list:
@@ -1067,7 +1078,7 @@ def full_calculate_corrected(model, scenario=None):
 
         m_ot  = max_lab_ot.get(lid, 0.0)
         nav_l = float(lab_count) * (1.0 + lab_ot / 100.0) / (1.0 + m_ot / 100.0)
-        num_av_lab[lid]    = max(nav_l, float(lab_count))
+        num_av_lab[lid]    = nav_l
         labor_util_map[lid] = total_frac
         labor_uset_map[lid] = setup_frac
         labor_urun_map[lid] = run_frac
@@ -1122,7 +1133,7 @@ def full_calculate_corrected(model, scenario=None):
         m, equipment_list, labor_by_id,
         xbarbar_eq, cs2_eq, tpm_eq, smbard_eq, lab_xbar_map,
         labor_util_map, labor_num_map, num_av_lab, num_av_eq,
-        var_labor, util_limit,
+        var_labor, util_limit, equip_uwait_pre,
     )
 
     xbarbar_eq, cs2_eq, tpm_eq, smbard_eq, lab_xbar_map = _run_xbar_cs()
@@ -1153,8 +1164,8 @@ def full_calculate_corrected(model, scenario=None):
         # BUG-1 FIX: total uwait = pre-lextra + lextra
         uwait_total = equip_uwait_pre.get(eq_id, 0.0) + uwait_lextra.get(eq_id, 0.0)
         unavail_f   = float(eq.get("unavail_pct", 0)) / 100.0  # BUG-15 FIX: added separately
-        total_f     = min(float(er["setupUtil"] + er["runUtil"] + er["repairUtil"]) / 100.0
-                          + uwait_total + unavail_f, 0.9999)
+        total_f     = min(equip_util_map.get(eq_id, 0.0)
+                          + uwait_lextra.get(eq_id, 0.0) + unavail_f, 0.9999)
 
         er["waitLaborUtil"]  = _r1(uwait_total * 100)
         er["totalUtil"]      = _r1(total_f * 100)
@@ -1260,13 +1271,17 @@ def full_calculate_corrected(model, scenario=None):
             if is_delay:
                 ft_tot += vpergood * wait_min
                 operation_results.append({
-                    "product": pname, "operation": op.get("op_name", ""),
-                    "equipment": eq.get("name", ""), "labor": "",
+                    "product": pname, "product_id": pid,
+                    "operation": op.get("op_name", ""),
+                    "equipment": eq.get("name", ""), "equip_id": eq_id,
+                    "labor": "", "labor_id": lid,
                     "assign_pct": op.get("pct_assigned", 100),
                     "visit_prob": _r4(vp),
                     "ueset": 0.0, "uerun": 0.0, "ulset": 0.0, "ulrun": 0.0,
                     "flowtime": 0.0, "n_setups": 0.0, "qpoper": 0.0,
                     "w_run": 0.0, "w_setup": 0.0, "w_lot": 0.0, "w_equip": 0.0, "w_labor": 0.0,
+                    "avg_lot_size": _r4(lsize),
+                    "visits_per_good": _r4(vpergood),
                 })
                 continue
 
@@ -1321,9 +1336,12 @@ def full_calculate_corrected(model, scenario=None):
 
             operation_results.append({
                 "product":   pname,
+                "product_id": pid,
                 "operation": op.get("op_name", ""),
                 "equipment": eq.get("name", ""),
+                "equip_id":  eq_id,
                 "labor":     lab.get("name", "") if lab else "",
+                "labor_id":  lid,
                 "assign_pct": op.get("pct_assigned", 100),
                 "visit_prob": _r4(vp),
                 "ueset":    _r4(ueset),
@@ -1338,6 +1356,8 @@ def full_calculate_corrected(model, scenario=None):
                 "w_lot":    _r4(w_lot_m   / conv1),
                 "w_equip":  _r4(w_equip_m / conv1),
                 "w_labor":  _r4(w_labor_m / conv1),
+                "avg_lot_size": _r4(lsize),
+                "visits_per_good": _r4(vpergood),
             })
 
         # Convert to shifts (÷ conv1)
@@ -1398,12 +1418,10 @@ def full_calculate_corrected(model, scenario=None):
         lid    = lr["id"]
         lab    = labor_by_id.get(lid)
         cnt    = int(lab.get("count", 0)) if lab else 0
-        sf     = labor_uset_map.get(lid, 0.0)
-        rf     = labor_urun_map.get(lid, 0.0)
-        qpl    = (sf + rf) * cnt if cnt > 0 else 0.0
-
-        # ql = sum(smbard * (1 + fac_eq_lab)) over equipment in group
+       
         eq_grp = [e for e in equipment_list if e.get("labor_group_id") == lid]
+        qpl    = sum(equip_uwait_raw.get(e["id"], 0.0) for e in eq_grp)
+        # ql = sum(smbard * (1 + fac_eq_lab)) over equipment in group
         ql     = sum(smbard_eq.get(e["id"], 0.0) * (1.0 + fac_eq_lab_map.get(e["id"], 0.0))
                      for e in eq_grp)
         qwl    = max(0.0, ql - qpl)
@@ -1448,7 +1466,8 @@ def full_calculate_corrected(model, scenario=None):
             pr[k] = _s(float(pr.get(k, 0)))
     for opr in operation_results:
         for k in ["ueset","uerun","ulset","ulrun","flowtime","n_setups","qpoper",
-                  "w_run","w_setup","w_lot","w_equip","w_labor","visit_prob"]:
+                  "w_run","w_setup","w_lot","w_equip","w_labor","visit_prob",
+                  "avg_lot_size","visits_per_good"]:
             opr[k] = _s(float(opr.get(k, 0)))
 
     return {
