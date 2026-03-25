@@ -359,6 +359,27 @@ def _eq_LABOR_T(op, eq, lab, lot_size_v, nb, lsize=None):
     return xs, (xr_lot / lsize if lsize > EPSILON else 0.0)
 
 
+def _labor_no_OT(op, eq, lab, lot_size_v, nb, ps_factor, lsize=None):
+    """
+    BUG-4 FIX: Labor times WITHOUT OT for use in set_xbar_cs.
+    Legacy: calc_op(LABOR_T) /= OT, then set_xbar_cs *= OT — net cancels.
+    Returns (xs_per_lot, xr_per_piece).
+    """
+    if lsize is None:
+        lsize = lot_size_v
+    esf = float(eq.get("setup_factor",  1))
+    erf = float(eq.get("run_factor",    1))
+    lsf = float(lab.get("setup_factor", 1) if lab else 1)
+    lrf = float(lab.get("run_factor",   1) if lab else 1)
+    xs = (float(op.get("labor_setup_lot",    0))
+          + float(op.get("labor_setup_tbatch", 0)) * nb
+          + float(op.get("labor_setup_piece",  0)) * lsize
+         ) * esf * lsf
+    xr_lot = (float(op.get("labor_run_lot",    0))
+              + float(op.get("labor_run_tbatch", 0)) * nb
+              + float(op.get("labor_run_piece",  0)) * lsize
+             ) * erf * lrf
+    return xs, (xr_lot / lsize if lsize > EPSILON else 0.0)
 def _eq_TBATCH_TOTAL_EQUIP(op, eq, lot_size_v, tbatch_v, lsize=None):
     if lsize is None:
         lsize = lot_size_v
@@ -916,8 +937,10 @@ def _compute_lextra(m, equipment_list, labor_by_id, xbarbar_eq, cs2_eq,
                 eid = e["id"]
                 nav = num_av_eq_map.get(eid, float(e.get("count", 1)))
                 fac_eq_lab_map[eid] = fac_g
-                if nav > SSEPSILON:
+                if int(e.get("count", 0)) > 0 and nav > SSEPSILON:
                     uwait_lextra[eid] = (fac_g * smbard_eq.get(eid, 0.0)) / nav
+                else:
+                    uwait_lextra[eid] = 0.0
 
         else:
             u1 = min(0.95, labor_ul)
@@ -1184,7 +1207,7 @@ def full_calculate_corrected(model, scenario=None):
         cnt   = int(eq.get("count", 0))
         eq_ot = float(eq.get("overtime_pct", 0))
         m_ot  = max_lab_ot.get(lid, 0.0)
-        num_av_eq[eid] = max(float(cnt) * (eq_ot + 100.0) / (100.0 + m_ot), float(cnt))
+        num_av_eq[eid] = float(cnt) * (eq_ot + 100.0) / (100.0 + m_ot)
 
     # ═══════════════════════════════════════════════════════════════════════════
     # EQUIPMENT UTILISATION PASS  (uses lvisit = visit_probs_all)
@@ -1376,7 +1399,7 @@ def full_calculate_corrected(model, scenario=None):
 
         m_ot  = max_lab_ot.get(lid, 0.0)
         nav_l = float(lab_count) * (1.0 + lab_ot / 100.0) / (1.0 + m_ot / 100.0)
-        num_av_lab[lid]    = max(nav_l, float(lab_count))
+        num_av_lab[lid]    = nav_l
         labor_util_map[lid] = total_frac
         labor_uset_map[lid] = setup_frac
         labor_urun_map[lid] = run_frac
@@ -1586,13 +1609,17 @@ def full_calculate_corrected(model, scenario=None):
             if is_delay:
                 ft_tot += vpergood * wait_min
                 operation_results.append({
-                    "product": pname, "operation": op.get("op_name", ""),
-                    "equipment": eq.get("name", ""), "labor": "",
+                    "product": pname, "product_id": pid,
+                    "operation": op.get("op_name", ""),
+                    "equipment": eq.get("name", ""), "equip_id": eq_id,
+                    "labor": "", "labor_id": lid,
                     "assign_pct": op.get("pct_assigned", 100),
                     "visit_prob": _r8(vp), "vpergood": _r8(vpergood),
                     "ueset": 0.0, "uerun": 0.0, "ulset": 0.0, "ulrun": 0.0,
                     "flowtime": 0.0, "n_setups": 0.0, "qpoper": 0.0,
                     "w_run": 0.0, "w_setup": 0.0, "w_lot": 0.0, "w_equip": 0.0, "w_labor": 0.0,
+                    "avg_lot_size": _r4(lsize),
+                    "visits_per_good": _r4(vpergood),
                 })
                 continue
 
@@ -1637,9 +1664,12 @@ def full_calculate_corrected(model, scenario=None):
 
             operation_results.append({
                 "product":    pname,
+                "product_id": pid,
                 "operation":  op.get("op_name", ""),
                 "equipment":  eq.get("name", ""),
+                "equip_id":   eq_id,
                 "labor":      lab.get("name", "") if lab else "",
+                "labor_id":   lid,
                 "assign_pct": op.get("pct_assigned", 100),
                 "visit_prob": _r8(vp),
                 "vpergood":   _r8(vpergood),
@@ -1655,6 +1685,8 @@ def full_calculate_corrected(model, scenario=None):
                 "w_lot":    _r8(w_lot_m   / conv1),
                 "w_equip":  _r8(w_equip_m / conv1),
                 "w_labor":  _r8(w_labor_m / conv1),
+                "avg_lot_size": _r8(lsize),
+                "visits_per_good": _r8(vpergood),
             })
 
         def to_s(m_):
@@ -1759,7 +1791,8 @@ def full_calculate_corrected(model, scenario=None):
             pr[k] = _s(float(pr.get(k, 0)))
     for opr in operation_results:
         for k in ["ueset","uerun","ulset","ulrun","flowtime","n_setups","qpoper",
-                  "w_run","w_setup","w_lot","w_equip","w_labor","visit_prob","vpergood"]:
+                  "w_run","w_setup","w_lot","w_equip","w_labor","visit_prob",
+                  "avg_lot_size","visits_per_good","vpergood"]:
             opr[k] = _s(float(opr.get(k, 0)))
 
     return {
