@@ -8,6 +8,9 @@ class ApiAuthMiddleware:
     def __call__(self, request):
 
         if request.path.startswith("/api/"):
+            # Browser session bootstrap (same-origin /api proxy); not for JWT.
+            if request.path.startswith("/api/auth/"):
+                return self.get_response(request)
 
             public_paths = [
                 "/api/login/",

@@ -13,6 +13,8 @@ urlpatterns = [
     path('models/<uuid:model_id>/delete/', views.model_delete),
     path('models/<uuid:model_id>/param-names/', views.model_param_names),
     path('models/<uuid:model_id>/param-names/upsert/', views.model_param_names_upsert),
+    path('models/<uuid:model_id>/dept-codes/', views.model_dept_codes),
+    path('models/<uuid:model_id>/dept-codes/save/', views.model_dept_codes_put),
     # Versions
     path('models/<uuid:model_id>/versions/', views.version_list),
     path('models/<uuid:model_id>/versions/create/', views.version_create),

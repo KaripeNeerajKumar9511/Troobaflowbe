@@ -99,7 +99,7 @@ DATABASES = {
    'ENGINE': 'django.db.backends.postgresql',
    'NAME': 'RMCT',
    'USER': 'postgres',
-   'PASSWORD': 'Neer@j9511',
+   'PASSWORD': 'Saivarun1234',
    'HOST': 'localhost',
    'PORT': '5432',
  }
@@ -141,12 +141,18 @@ CORS_ALLOW_CREDENTIALS = True
 
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
     "http://127.0.0.1:8000",
+    "http://victus:8080",
 ]
 
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:3000",
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
     "http://127.0.0.1:8000",
+    "http://victus:8080",
 ]
 
 # Session cookie (auth): HttpOnly, sent with every request

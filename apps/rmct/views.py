@@ -310,8 +310,7 @@ def _model_to_payload(m: RMCMModel) -> dict:
         'is_demo': bool(m.is_demo),
         'is_starred': bool(m.is_starred),
         'general': _serialize_general(m),
-        # Param names are no longer stored on RMCMModel; return an empty mapping.
-        'param_names': {},
+        'param_names': m.param_names if isinstance(getattr(m, "param_names", None), dict) else {},
         'labor': _labor_for_model(m),
         'equipment': _equipment_for_model(m),
         'products': _products_for_model(m),
@@ -383,6 +382,10 @@ def model_save(request, model_id=None):
         'is_demo': data.get('is_demo', False),
         'is_starred': data.get('is_starred', False),
     }
+    if isinstance(data.get('param_names'), dict):
+        defaults['param_names'] = data['param_names']
+    if isinstance(data.get('dept_codes'), dict):
+        defaults['dept_codes'] = data['dept_codes']
     if request.user.is_authenticated:
         defaults['owner'] = request.user
     obj, created = RMCMModel.objects.update_or_create(id=uid, defaults=defaults)
@@ -401,6 +404,10 @@ def model_patch(request, model_id):
                 'is_archived', 'is_demo', 'is_starred'):
         if key in data:
             setattr(m, key, data[key])
+    if isinstance(data.get('param_names'), dict):
+        m.param_names = data['param_names']
+    if isinstance(data.get('dept_codes'), dict):
+        m.dept_codes = data['dept_codes']
     m.save()
     return JsonResponse(_model_to_payload(m))
 
@@ -420,19 +427,42 @@ def model_delete(request, model_id):
 @require_http_methods(['GET'])
 def model_param_names(request, model_id):
     """GET /api/models/:id/param-names."""
-    # Param names are no longer stored on RMCMModel; always return an empty mapping.
-    return JsonResponse({})
+    m = get_object_or_404(RMCMModel, id=model_id)
+    return JsonResponse(m.param_names if isinstance(m.param_names, dict) else {})
 
 
 @csrf_exempt
 @require_http_methods(['PUT'])
 def model_param_names_upsert(request, model_id):
     """PUT /api/models/:id/param-names — merge param names."""
+    m = get_object_or_404(RMCMModel, id=model_id)
     data = _parse_json(request)
     if data is None:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
-    # Endpoint is now a no-op; accept payload but do not persist on RMCMModel.
-    return JsonResponse({})
+    cur = m.param_names if isinstance(m.param_names, dict) else {}
+    cur = {**cur, **{k: v for k, v in data.items() if k != "model_id"}}
+    m.param_names = cur
+    m.save(update_fields=["param_names", "updated_at"])
+    return JsonResponse(cur)
+
+
+@require_http_methods(['GET'])
+def model_dept_codes(request, model_id):
+    m = get_object_or_404(RMCMModel, id=model_id)
+    dc = m.dept_codes if isinstance(m.dept_codes, dict) else {}
+    return JsonResponse(dc)
+
+
+@csrf_exempt
+@require_http_methods(['PUT'])
+def model_dept_codes_put(request, model_id):
+    m = get_object_or_404(RMCMModel, id=model_id)
+    data = _parse_json(request)
+    if data is None:
+        return JsonResponse({'error': 'Invalid JSON'}, status=400)
+    m.dept_codes = data if isinstance(data, dict) else {}
+    m.save(update_fields=["dept_codes", "updated_at"])
+    return JsonResponse(m.dept_codes)
 
 
 # ─── General ─────────────────────────────────────────────────────────────
