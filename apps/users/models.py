@@ -26,6 +26,8 @@ class UserProfile(models.Model):
 
     role = models.CharField(max_length=50, db_index=True, default="user")
 
+    user_level = models.PositiveSmallIntegerField(default=1)
+
     is_active = models.BooleanField(default=True, db_index=True)
 
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
@@ -47,7 +49,7 @@ class UserProfile(models.Model):
 
 def create_user_account(*, name: str, email: str, password: str, password_confirm: str, organization):
 
-    email = (email or "").strip()
+    email = (email or "").strip().lower()
     name = (name or "").strip()
 
     if not email:
@@ -59,7 +61,7 @@ def create_user_account(*, name: str, email: str, password: str, password_confir
     if password != password_confirm:
         return None, "Passwords do not match"
 
-    if User.objects.filter(email=email).exists():
+    if User.objects.filter(email__iexact=email).exists():
         return None, "An account with this email already exists"
 
     user = User.objects.create_user(
@@ -83,31 +85,56 @@ def authenticate_user(*, email: str, password: str):
 
     Returns (user, error_message). If error_message is not None, user will be None.
     """
-    email = (email or "").strip()
+    email = (email or "").strip().lower()
     password = password or ""
 
     if not email or not password:
         return None, "Email and password are required"
 
     user = authenticate(username=email, password=password)
-    if user is None:
-        return None, "Invalid credentials"
+    if user is not None:
+        return user, None
 
-    return user, None
+    # Username is stored as normalized email; also try DB user whose email matches case-insensitively.
+    existing = User.objects.filter(email__iexact=email).first()
+    if existing is not None:
+        user = authenticate(username=existing.username, password=password)
+        if user is not None:
+            return user, None
+
+    return None, "Invalid credentials"
 
 
 def get_profile_payload(user: User):
+    if not user.is_authenticated:
+        return {"email": None, "name": None, "organization_id": None, "organization_name": None, "role": None, "user_level": 1}
 
-    profile, _ = UserProfile.objects.get_or_create(
-        user=user,
-        defaults={"full_name": user.get_full_name() or user.email},
-    )
+    try:
+        profile = user.profile
+    except UserProfile.DoesNotExist:
+        return {
+            "id": user.id,
+            "email": user.email,
+            "name": user.get_full_name() or user.email,
+            "organization_id": None,
+            "organization_name": None,
+            "role": "user",
+            "user_level": 1,
+        }
 
-    name = profile.full_name or user.get_full_name() or user.email
+    org_name = ""
+    if profile.organization_id:
+        try:
+            org_name = profile.organization.name
+        except Exception:
+            org_name = ""
 
     return {
+        "id": user.id,
         "email": user.email,
-        "name": name,
-        "organization_id": profile.organization_id,
+        "name": profile.full_name or user.get_full_name() or user.email,
+        "organization_id": str(profile.organization_id),
+        "organization_name": org_name,
         "role": profile.role,
+        "user_level": profile.user_level,
     }

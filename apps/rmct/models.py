@@ -22,6 +22,8 @@ class RMCMModel(models.Model):
     is_archived = models.BooleanField(default=False)
     is_demo = models.BooleanField(default=False)
     is_starred = models.BooleanField(default=False)
+    param_names = models.JSONField(default=dict, blank=True)
+    dept_codes = models.JSONField(default=dict, blank=True)
     # Full nested data (mirrors frontend Model type)
     # general = models.JSONField(default=dict)
     # param_names = models.JSONField(default=dict)

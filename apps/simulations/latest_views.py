@@ -1,45 +1,3 @@
-"""
-full_calculate_corrected_v9.py
-
-Changes from v8 → v9  (C++ legacy exact-match fixes based on dll2.zip source):
-
-FIX-1 / BUG-CS2LAB:
-    In _compute_lextra() the num_v formula (ca² computation) used
-        cs2_lab = (var_factor × var_labor)²   ← power 2  (WRONG)
-    C++ calc2.cpp uses tlabor->cs2 which, by the time lextra() runs,
-    has been updated by set_xbar_cs() Phase-2 to:
-        tlabor->cs2 = (faccvs × v_lab/100)^0.9   ← power 0.9  (CORRECT)
-    Fixed: cs2_lab = min(4.0, (lab_vf * var_labor) ** 0.9)
-
-FIX-2 / BUG-CT2-SECOND-PASS:
-    C++ tlabor->ct2 is set ONCE in set_xbar_cs() Phase-1 as (faccvs×v_lab/100)²
-    and is NEVER updated again — ggc() writes to tlabor->ct2 but that field
-    is NOT tlabor->ct2 used in the xprsig formula; the C++ struct keeps them
-    separate.  After lextra(), the second set_xbar_cs() call still sees the
-    original squared ct2.
-    Python was passing ct2_lab_map updated by _ggc_wait() into the second
-    _compute_xbar_cs() call, causing a mismatch.
-    Fixed: reset ct2_lab_map to original squared values before the second
-    _compute_xbar_cs() call.
-
-FIX-3 / BUG-SMBARD-TIMING:
-    C++ accumulates teq->smbard in mpc() (the util pass) and does NOT
-    recompute it inside set_xbar_cs().  The smb values therefore reflect
-    fac_eq_lab=0 (pre-lextra) and are frozen for both xbar_cs passes.
-    Python was recomputing smb inside every _compute_xbar_cs() call,
-    meaning the second pass used updated fac_eq_lab values → different smb.
-    Fixed: smbard_eq is computed once during the util pass and passed into
-    _compute_xbar_cs() as a frozen input; the function no longer recomputes it.
-
-FIX-4 / BUG-DO-BALANCE-TUTIL:
-    C++ do_balance() accumulates:
-        t_util += teq->num * (teq->uset + teq->urun + teq->udown)
-    Python was missing the × teq->num multiplication.
-    Fixed: t_util += equip_sru_map[eid] * num_av_eq_map[eid]
-
-All previously documented fixes (BUG-1 … BUG-17, FIX-VPG, FIX-XBCS,
-FIX-DO_BALANCE, FIX-LVISIT-UTIL) are preserved.
-"""
 
 from __future__ import annotations
 import math
@@ -316,7 +274,7 @@ def f_avail_equip(count: float, overtime_pct: float, ops_per_period: float) -> f
 
 
 def f_num_lots(demand: float, lot_size_val: float, assign_fraction: float) -> float:
-    return (float(demand) / float(lot_size_val)) * float(assign_fraction)
+    return (float(demand) // float(lot_size_val)) * float(assign_fraction)  
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1731,8 +1689,11 @@ def full_calculate_corrected(model, scenario=None):
         if not eq: continue
         eq_id  = er["id"]
         q_tot  = eq_q_acc.get(eq_id, 0.0)
-        qp     = eq_qp_raw.get(eq_id, 0.0)
-        qw     = max(0.0, q_tot - qp)
+        machine_count = int(eq.get("count", 0))
+        utilization   = equip_util_map.get(eq_id, 0.0)
+
+        qp = utilization * machine_count
+        qw = max(0.0, q_tot - qp)
         er["wip_process"] = _r8(max(0.0, qp))
         er["wip_queue"]   = _r8(qw)
         er["wip_total"]   = _r8(max(0.0, q_tot))
@@ -1807,9 +1768,74 @@ def full_calculate_corrected(model, scenario=None):
     }
 
 
+def verify_model_data(model: dict) -> Dict[str, List[str]]:
+    """Structural checks matching frontend verifyData (no numeric simulation)."""
+    errors: List[str] = []
+    warnings: List[str] = []
+    labor = model.get("labor") or []
+    equipment = model.get("equipment") or []
+    products = model.get("products") or []
+    operations = model.get("operations") or []
+    routing = model.get("routing") or []
+
+    if len(labor) == 0:
+        warnings.append("No labor groups defined.")
+    if len(equipment) == 0:
+        warnings.append("No equipment groups defined.")
+    if len(products) == 0:
+        errors.append("No products defined.")
+    if len(operations) == 0:
+        errors.append("No operations defined for any product.")
+
+    labor_ids = {str(x.get("id", "")) for x in labor}
+    equip_ids = {str(x.get("id", "")) for x in equipment}
+
+    for eq in equipment:
+        lid = str(eq.get("labor_group_id") or "")
+        if lid and lid not in labor_ids:
+            errors.append(f'Equipment "{eq.get("name", "")}" references non-existent labor group.')
+
+    for op in operations:
+        eid = str(op.get("equip_id") or "")
+        if eid and eid not in equip_ids:
+            errors.append(f'Operation "{op.get("op_name", "")}" references non-existent equipment.')
+
+    prod_by_id = {str(p.get("id")): p for p in products}
+    for p in products:
+        pid = str(p.get("id", ""))
+        if float(p.get("demand", 0) or 0) > 0:
+            if not any(str(o.get("product_id")) == pid for o in operations):
+                warnings.append(f'Product "{p.get("name", "")}" has demand but no operations.')
+
+    from_ops_set = set()
+    for r in routing:
+        from_ops_set.add((str(r.get("product_id", "")), str(r.get("from_op_name", ""))))
+    for pid, from_op in from_ops_set:
+        outgoing = [r for r in routing if str(r.get("product_id", "")) == pid and str(r.get("from_op_name", "")) == from_op]
+        total = sum(float(r.get("pct_routed", 0) or 0) for r in outgoing)
+        if outgoing and abs(total - 100.0) > 0.1:
+            pname = prod_by_id.get(pid, {}).get("name", pid)
+            warnings.append(f'Product "{pname}": routing from "{from_op}" sums to {total}%, not 100%.')
+
+    return {"errors": errors, "warnings": warnings}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Django view
 # ─────────────────────────────────────────────────────────────────────────────
+@csrf_exempt
+@require_http_methods(["POST"])
+def verify_model_view(request):
+    data = _parse_json(request)
+    if data is None:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    model = data.get("model")
+    if not model:
+        return JsonResponse({"error": "Missing 'model' in body"}, status=400)
+    payload = verify_model_data(model)
+    return JsonResponse(payload)
+
+
 @csrf_exempt
 @require_http_methods(["POST"])
 def full_calculate_view(request):

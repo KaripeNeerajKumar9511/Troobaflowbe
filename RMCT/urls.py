@@ -18,9 +18,16 @@ from django.contrib import admin
 from django.urls import path, include
 from apps.simulations import views as simulation_views
 from apps.simulations import latest_views as simulation_latest_views
+from apps.users import views as user_views
 
 urlpatterns = [
     path("admin/", admin.site.urls),
+    # Explicit routes (not include()) so /api/auth/* always resolves before any path("api/", include(...)).
+    path("api/auth/csrf/", user_views.csrf_cookie),
+    path("api/auth/signup/", user_views.signup),
+    path("api/auth/login/", user_views.login_view),
+    path("api/auth/profile/", user_views.profile),
+    path("api/auth/logout/", user_views.logout_view),
     path("", include("apps.users.urls")),
     path("", include("apps.labor.urls")),  # /api/labor, /api/labor/add, etc.
     path("api/", include("apps.rmct.urls")),
@@ -35,4 +42,5 @@ urlpatterns = [
     # existing frontend-only calculation engine.
     path("api/simulations/rows", simulation_views.simulate_rows, name="simulate-rows"),
     path("api/simulations/full-calculate", simulation_latest_views.full_calculate_view, name="full-calculate"),
+    path("api/simulations/verify", simulation_latest_views.verify_model_view, name="verify-model"),
 ]
