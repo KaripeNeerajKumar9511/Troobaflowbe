@@ -25,6 +25,11 @@ def _s(v: float) -> float:
     return v if (v == v and abs(v) != float("inf")) else 0.0
 
 
+def _sanitize(v: float) -> float:
+    """Convert NaN/inf to 0.0 for JSON-safe numeric output."""
+    return _s(float(v))
+
+
 def _r1(x: float) -> float:
     return round(float(x) * 10) / 10
 
@@ -1654,6 +1659,7 @@ def full_calculate_corrected(model, scenario=None):
         cap_lim    = f_capacity_limited_flow(product, ops, equipment_list, ops_per_period, vp_map)
         needed     = demand_total / yield_frac if yield_frac > 0 else float("inf")
         started    = round(min(needed, cap_lim)) if cap_lim != float("inf") else round(needed)
+        print(f"started: {started}, needed: {needed}, cap_lim: {cap_lim}, yield_frac: {yield_frac}")
         good_made  = round(started * yield_frac)
         scrap_cnt  = max(0, started - good_made)
         shipped    = round(min(good_made, demand_end))
@@ -1694,10 +1700,51 @@ def full_calculate_corrected(model, scenario=None):
 
         qp = utilization * machine_count
         qw = max(0.0, q_tot - qp)
+        # print(f"qp: {qp}, qw: {qw}, q_tot: {q_tot}")
         er["wip_process"] = _r8(max(0.0, qp))
         er["wip_queue"]   = _r8(qw)
         er["wip_total"]   = _r8(max(0.0, q_tot))
         er["wait_min"]    = _r8(eq_wait_map.get(eq_id, 0.0))
+
+
+    equip_by_id: Dict[str, Dict[str, Any]] = {e.get("id", ""): e for e in m.get("equipment", [])}
+    for er in equip_rows:
+        eq = equip_by_id.get(er.get("id", ""), {})
+        eq_count = int(eq.get("count", er.get("count", 0)) or 0)
+        base_util = float(er.get("setupUtil", 0)) + float(er.get("runUtil", 0))
+        tended = min(1.0, base_util / 100.0) * max(0, eq_count)
+        waiting = (float(er.get("waitLaborUtil", 0)) / 100.0) * max(0, eq_count)
+        er["machinesTended"] = _r8(_sanitize(tended))
+        er["machinesWaiting"] = _r8(_sanitize(waiting))
+
+    # Aggregate to labor groups (avg machines tended / waiting, and avg wait-labor util across equipment groups)
+    equip_rows_by_id: Dict[str, Dict[str, Any]] = {e.get("id", ""): e for e in equip_rows}
+    for lr in labor_rows:
+        lab_id = lr.get("id", "")
+        eq_ids = [e.get("id", "") for e in m.get("equipment", []) if (e.get("labor_group_id") or "") == lab_id]
+        if not eq_ids:
+            lr["machinesTended"] = 0.0
+            lr["machinesWaiting"] = 0.0
+            lr["avgWaitLaborUtil"] = 0.0
+            continue
+
+        tended_sum = 0.0
+        waiting_sum = 0.0
+        wait_util_sum = 0.0
+        n = 0
+        for eq_id in eq_ids:
+            er = equip_rows_by_id.get(eq_id)
+            if not er:
+                continue
+            tended_sum += float(er.get("machinesTended", 0) or 0)
+            waiting_sum += float(er.get("machinesWaiting", 0) or 0)
+            wait_util_sum += float(er.get("waitLaborUtil", 0) or 0)
+            n += 1
+
+        lr["machinesTended"] = _r8(_sanitize(tended_sum))
+        lr["machinesWaiting"] = _r8(_sanitize(waiting_sum))
+        lr["avgWaitLaborUtil"] = _r8(_sanitize(wait_util_sum / max(1, n)))
+        print(f"lr: {lr}")
 
     # ── Labor WIP ─────────────────────────────────────────────────────────────
     for lr in labor_rows:
