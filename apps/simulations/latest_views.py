@@ -57,27 +57,8 @@ def _persist_full_calculate_output(
     response_payload: Dict[str, Any],
     status: str = "success",
 ) -> Optional[str]:
-    """
-    Persist each full-calculate request/response snapshot to one folder.
-    """
-    root = Path(__file__).resolve().parents[2] / "tmp" / "full_calculate_outputs"
-    root.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
-    out_path = root / f"run_{stamp}_{status}.json"
-    payload = {
-        "savedAt": datetime.now(timezone.utc).isoformat(),
-        "status": status,
-        "request": {
-            "model": model,
-            "scenario": scenario,
-        },
-        "response": response_payload,
-    }
-    try:
-        out_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
-        return str(out_path)
-    except OSError:
-        return None
+    # Disabled: do not persist request/response snapshots to backend/tmp.
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1931,9 +1912,6 @@ def full_calculate_view(request):
     try:
         results = run_full_calculate_via_dll(model, scenario)
         response_payload = {"results": results}
-        saved_path = _persist_full_calculate_output(model, scenario, response_payload, status="success")
-        if saved_path:
-            logger.info("Saved full-calculate output: %s", saved_path)
         return JsonResponse(response_payload)
     except DllRunDiagnostics as e:
         logger.warning("full_calculate DLL execution failed: %s", e)
@@ -1942,14 +1920,8 @@ def full_calculate_view(request):
             "errorType": type(e).__name__,
             "diagnostics": e.diagnostics,
         }
-        saved_path = _persist_full_calculate_output(model, scenario, error_payload, status="error_422")
-        if saved_path:
-            logger.info("Saved full-calculate error output: %s", saved_path)
         return JsonResponse(error_payload, status=422)
     except Exception as e:
         logger.exception("full_calculate failed")
         error_payload = {"error": str(e), "errorType": type(e).__name__}
-        saved_path = _persist_full_calculate_output(model, scenario, error_payload, status="error_500")
-        if saved_path:
-            logger.info("Saved full-calculate exception output: %s", saved_path)
         return JsonResponse(error_payload, status=500)

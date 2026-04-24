@@ -85,15 +85,8 @@ def _safe_preview(path: Path, max_lines: int = 8) -> List[str]:
 
 
 def _persist_failure_artifacts(temp_dir: Path) -> Optional[str]:
-    root = Path(__file__).resolve().parents[2] / "tmp" / "dll_failures"
-    root.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
-    target = root / f"run_{stamp}"
-    try:
-        shutil.copytree(temp_dir, target)
-    except OSError:
-        return None
-    return str(target)
+    # Disabled: do not persist DLL failure artifacts to backend/tmp.
+    return None
 
 
 def _persist_input_debug_artifacts(
@@ -102,31 +95,8 @@ def _persist_input_debug_artifacts(
     model_for_dll_contract: Dict[str, Any],
     dll_payload: Dict[str, Any],
 ) -> Optional[str]:
-    root = Path(__file__).resolve().parents[2] / "tmp" / "dll_inputs"
-    root.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
-    target = root / f"run_{stamp}"
-    try:
-        target.mkdir(parents=True, exist_ok=False)
-        (target / "model_from_db.json").write_text(
-            json.dumps(model_from_db, ensure_ascii=True, indent=2),
-            encoding="utf-8",
-        )
-        (target / "model_after_scenario.json").write_text(
-            json.dumps(model_after_scenario, ensure_ascii=True, indent=2),
-            encoding="utf-8",
-        )
-        (target / "model_for_dll_contract.json").write_text(
-            json.dumps(model_for_dll_contract, ensure_ascii=True, indent=2),
-            encoding="utf-8",
-        )
-        (target / "dll_payload.json").write_text(
-            json.dumps(dll_payload, ensure_ascii=True, indent=2),
-            encoding="utf-8",
-        )
-    except OSError:
-        return None
-    return str(target)
+    # Disabled: do not persist DLL input debug artifacts to backend/tmp.
+    return None
 
 
 def _sanitize(value: float) -> float:
@@ -1139,5 +1109,4 @@ def run_full_calculate_via_dll(model: Dict[str, Any], scenario: Optional[Dict[st
             parsed.setdefault("warnings", []).append(
                 f"DLL returned non-zero code ({rc}) but produced usable outputs without fatal results.err entries."
             )
-        parsed["debugInputDir"] = persisted_input_dir
         return parsed
