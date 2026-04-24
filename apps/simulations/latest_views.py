@@ -5,12 +5,14 @@ import json
 import logging
 from collections import defaultdict
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
+from .dll_full_calculate import DllRunDiagnostics, run_full_calculate_via_dll
 
 logger = logging.getLogger(__name__)
 
@@ -38,10 +40,43 @@ def _r8(x: float) -> float:
     return round(float(x) * 10000) / 10000
 
 
+def _r4(x: float) -> float:
+    return round(float(x) * 10000) / 10000
+
+
 def _parse_json(request):
     try:
         return json.loads(request.body) if request.body else {}
     except json.JSONDecodeError:
+        return None
+
+
+def _persist_full_calculate_output(
+    model: Any,
+    scenario: Any,
+    response_payload: Dict[str, Any],
+    status: str = "success",
+) -> Optional[str]:
+    """
+    Persist each full-calculate request/response snapshot to one folder.
+    """
+    root = Path(__file__).resolve().parents[2] / "tmp" / "full_calculate_outputs"
+    root.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+    out_path = root / f"run_{stamp}_{status}.json"
+    payload = {
+        "savedAt": datetime.now(timezone.utc).isoformat(),
+        "status": status,
+        "request": {
+            "model": model,
+            "scenario": scenario,
+        },
+        "response": response_payload,
+    }
+    try:
+        out_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+        return str(out_path)
+    except OSError:
         return None
 
 
@@ -1894,11 +1929,27 @@ def full_calculate_view(request):
     if not model:
         return JsonResponse({"error": "Missing 'model' in body"}, status=400)
     try:
-        results = full_calculate_corrected(model, scenario)
-        return JsonResponse({"results": results})
+        results = run_full_calculate_via_dll(model, scenario)
+        response_payload = {"results": results}
+        saved_path = _persist_full_calculate_output(model, scenario, response_payload, status="success")
+        if saved_path:
+            logger.info("Saved full-calculate output: %s", saved_path)
+        return JsonResponse(response_payload)
+    except DllRunDiagnostics as e:
+        logger.warning("full_calculate DLL execution failed: %s", e)
+        error_payload = {
+            "error": str(e),
+            "errorType": type(e).__name__,
+            "diagnostics": e.diagnostics,
+        }
+        saved_path = _persist_full_calculate_output(model, scenario, error_payload, status="error_422")
+        if saved_path:
+            logger.info("Saved full-calculate error output: %s", saved_path)
+        return JsonResponse(error_payload, status=422)
     except Exception as e:
         logger.exception("full_calculate failed")
-        return JsonResponse(
-            {"error": str(e), "errorType": type(e).__name__},
-            status=500,
-        )
+        error_payload = {"error": str(e), "errorType": type(e).__name__}
+        saved_path = _persist_full_calculate_output(model, scenario, error_payload, status="error_500")
+        if saved_path:
+            logger.info("Saved full-calculate exception output: %s", saved_path)
+        return JsonResponse(error_payload, status=500)

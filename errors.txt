@@ -1,0 +1,838 @@
+Starting c++ calculations 
+
+before c1 start11
+ 
+C:\Techsprout.ai projects\Trooba RMCT new\backend 
+after  c1 start2aa
+ 
+lsize 5 5 
+after  c1 start2b
+ 
+step2 lsize 5 5 
+after  c1 start2c
+ 
+after  c1 start21
+ 
+at start of run it 
+ 
+after c1 start4
+ 
+after c1 start 5
+ 
+after c1 start 5
+ 
+At header results.err 
+0 
+0 
+0 
+2 
+2 
+2 
+3 
+3 
+3 
+10 
+10 
+10 
+20 
+20 
+20 
+30 
+30 
+30 
+40 
+40 
+40 
+50 
+50 
+50 
+60 
+60 
+60 
+70 
+70 
+70 
+0 
+0 
+0 
+12 
+12 
+12 
+13 
+13 
+13 
+10 
+10 
+10 
+20 
+20 
+20 
+30 
+30 
+30 
+40 
+40 
+40 
+50 
+50 
+50 
+60 
+60 
+60 
+70 
+70 
+70 
+0 
+0 
+0 
+22 
+22 
+22 
+23 
+23 
+23 
+10 
+10 
+10 
+20 
+20 
+20 
+30 
+30 
+30 
+40 
+40 
+40 
+50 
+50 
+50 
+60 
+60 
+60 
+70 
+70 
+70 
+0 
+0 
+0 
+32 
+32 
+32 
+33 
+33 
+33 
+10 
+10 
+10 
+20 
+20 
+20 
+30 
+30 
+30 
+40 
+40 
+40 
+50 
+50 
+50 
+60 
+60 
+60 
+70 
+70 
+70 
+0 
+0 
+0 
+42 
+42 
+42 
+43 
+43 
+43 
+10 
+10 
+10 
+20 
+20 
+20 
+0 
+0 
+0 
+47 
+47 
+47 
+48 
+48 
+48 
+10 
+10 
+10 
+20 
+20 
+20 
+0 
+0 
+0 
+52 
+52 
+52 
+53 
+53 
+53 
+10 
+10 
+10 
+20 
+20 
+20 
+0 
+0 
+0 
+57 
+57 
+57 
+58 
+58 
+58 
+10 
+10 
+10 
+20 
+20 
+20 
+after set route ptrs  
+after load data 5
+ 
+at start of run it 
+ 
+after load in run it 
+ 
+start write check 
+  after opers part count  8  
+  after opers part count  8  
+1 
+ 
+* NAME              NAME                  ASSIGNED  
+ 
+2 
+ 
+* NAME              NAME                  ASSIGNED  
+ 
+3 
+ 
+* NAME              NAME                  ASSIGNED  
+ 
+4 
+ 
+* NAME              NAME                  ASSIGNED  
+ 
+5 
+ 
+* NAME              NAME                  ASSIGNED  
+ 
+6 
+ 
+* NAME              NAME                  ASSIGNED  
+ 
+7 
+ 
+* NAME              NAME                  ASSIGNED  
+ 
+8 
+ 
+* NAME              NAME                  ASSIGNED  
+ 
+done parts demand, oper route  
+done writing mpx.mdl 
+after after write  about to mpcalc in run it 
+ 
+at mpcc0 1 
+at start do_visits 
+check_rout ?  do_visits-1 prod 
+begin do visit a part 
+after check_ops 
+at start do_visits A 
+ at 6-1  
+ at 6-1a  
+ at 6-1a  
+ at 6-1a  
+ at 6-1a  
+ at 6-1a  
+ at 6-1a  
+ at 6-1a  
+ at 6-0  
+ at 6 end  
+after count_op  
+after count_op A  10  
+did some arrsize 110  
+about to mem !!!  
+done pij load  
+did load pij  
+did memcpy   
+ att 2  
+did invert pij  
+got visit numbers 
+in do_visits no. of visits 0 1.000000 100.000000  
+in do_visits no. of visits 1 1.000000 100.000000  
+in do_visits no. of visits 2 -0.000000 100.000000  
+in do_visits no. of visits 3 1.000000 100.000000  
+in do_visits no. of visits 4 1.000000 100.000000  
+in do_visits no. of visits 5 1.000000 100.000000  
+in do_visits no. of visits 6 1.000000 100.000000  
+in do_visits no. of visits 7 1.117647 100.000000  
+in do_visits no. of visits 8 0.117647 100.000000  
+in do_visits no. of visits 9 1.000000 100.000000  
+afte 1 do visits 
+after 1 do visits 
+in do_visits 
+check_rout ?  do_visits-1 prod 
+begin do visit a part 
+after check_ops 
+at start do_visits A 
+ at 6-1  
+ at 6-1a  
+ at 6-1a  
+ at 6-1a  
+ at 6-1a  
+ at 6-1a  
+ at 6-1a  
+ at 6-1a  
+ at 6-0  
+ at 6 end  
+after count_op  
+after count_op A  10  
+did some arrsize 110  
+about to mem !!!  
+done pij load  
+did load pij  
+did memcpy   
+ att 2  
+did invert pij  
+got visit numbers 
+in do_visits no. of visits 0 1.000000 100.000000  
+in do_visits no. of visits 1 1.000000 100.000000  
+in do_visits no. of visits 2 -0.000000 100.000000  
+in do_visits no. of visits 3 1.000000 100.000000  
+in do_visits no. of visits 4 1.000000 100.000000  
+in do_visits no. of visits 5 1.000000 100.000000  
+in do_visits no. of visits 6 1.000000 100.000000  
+in do_visits no. of visits 7 1.266667 100.000000  
+in do_visits no. of visits 8 0.266667 100.000000  
+in do_visits no. of visits 9 1.000000 100.000000  
+afte 1 do visits 
+after 1 do visits 
+in do_visits 
+check_rout ?  do_visits-1 prod 
+begin do visit a part 
+after check_ops 
+at start do_visits A 
+ at 6-1  
+ at 6-1a  
+ at 6-1a  
+ at 6-1a  
+ at 6-1a  
+ at 6-1a  
+ at 6-1a  
+ at 6-1a  
+ at 6-0  
+ at 6 end  
+after count_op  
+after count_op A  10  
+did some arrsize 110  
+about to mem !!!  
+done pij load  
+did load pij  
+did memcpy   
+ att 2  
+did invert pij  
+got visit numbers 
+in do_visits no. of visits 0 1.000000 100.000000  
+in do_visits no. of visits 1 1.000000 100.000000  
+in do_visits no. of visits 2 -0.000000 100.000000  
+in do_visits no. of visits 3 1.000000 100.000000  
+in do_visits no. of visits 4 1.000000 100.000000  
+in do_visits no. of visits 5 1.000000 100.000000  
+in do_visits no. of visits 6 1.000000 100.000000  
+in do_visits no. of visits 7 1.052632 100.000000  
+in do_visits no. of visits 8 0.052632 100.000000  
+in do_visits no. of visits 9 1.000000 100.000000  
+afte 1 do visits 
+after 1 do visits 
+in do_visits 
+check_rout ?  do_visits-1 prod 
+begin do visit a part 
+after check_ops 
+at start do_visits A 
+ at 6-1  
+ at 6-1a  
+ at 6-1a  
+ at 6-1a  
+ at 6-1a  
+ at 6-1a  
+ at 6-1a  
+ at 6-1a  
+ at 6-0  
+ at 6 end  
+after count_op  
+after count_op A  10  
+did some arrsize 110  
+about to mem !!!  
+done pij load  
+did load pij  
+did memcpy   
+ att 2  
+did invert pij  
+got visit numbers 
+in do_visits no. of visits 0 1.000000 100.000000  
+in do_visits no. of visits 1 1.000000 100.000000  
+in do_visits no. of visits 2 -0.000000 100.000000  
+in do_visits no. of visits 3 1.000000 100.000000  
+in do_visits no. of visits 4 1.000000 100.000000  
+in do_visits no. of visits 5 1.000000 100.000000  
+in do_visits no. of visits 6 1.000000 100.000000  
+in do_visits no. of visits 7 1.117647 100.000000  
+in do_visits no. of visits 8 0.117647 100.000000  
+in do_visits no. of visits 9 1.000000 100.000000  
+afte 1 do visits 
+after 1 do visits 
+in do_visits 
+check_rout ?  do_visits-1 prod 
+begin do visit a part 
+after check_ops 
+at start do_visits A 
+ at 6-1  
+ at 6-1a  
+ at 6-1a  
+ at 6-0  
+ at 6 end  
+after count_op  
+after count_op A  5  
+did some arrsize 30  
+about to mem !!!  
+done pij load  
+did load pij  
+did memcpy   
+ att 2  
+did invert pij  
+got visit numbers 
+in do_visits no. of visits 0 1.000000 100.000000  
+in do_visits no. of visits 1 1.000000 100.000000  
+in do_visits no. of visits 2 -0.000000 100.000000  
+in do_visits no. of visits 3 1.000000 100.000000  
+in do_visits no. of visits 4 1.000000 100.000000  
+afte 1 do visits 
+after 1 do visits 
+in do_visits 
+check_rout ?  do_visits-1 prod 
+begin do visit a part 
+after check_ops 
+at start do_visits A 
+ at 6-1  
+ at 6-1a  
+ at 6-1a  
+ at 6-0  
+ at 6 end  
+after count_op  
+after count_op A  5  
+did some arrsize 30  
+about to mem !!!  
+done pij load  
+did load pij  
+did memcpy   
+ att 2  
+did invert pij  
+got visit numbers 
+in do_visits no. of visits 0 1.000000 100.000000  
+in do_visits no. of visits 1 1.000000 100.000000  
+in do_visits no. of visits 2 -0.000000 100.000000  
+in do_visits no. of visits 3 1.000000 100.000000  
+in do_visits no. of visits 4 1.000000 100.000000  
+afte 1 do visits 
+after 1 do visits 
+in do_visits 
+check_rout ?  do_visits-1 prod 
+begin do visit a part 
+after check_ops 
+at start do_visits A 
+ at 6-1  
+ at 6-1a  
+ at 6-1a  
+ at 6-0  
+ at 6 end  
+after count_op  
+after count_op A  5  
+did some arrsize 30  
+about to mem !!!  
+done pij load  
+did load pij  
+did memcpy   
+ att 2  
+did invert pij  
+got visit numbers 
+in do_visits no. of visits 0 1.000000 100.000000  
+in do_visits no. of visits 1 1.000000 100.000000  
+in do_visits no. of visits 2 -0.000000 100.000000  
+in do_visits no. of visits 3 1.000000 100.000000  
+in do_visits no. of visits 4 1.000000 100.000000  
+afte 1 do visits 
+after 1 do visits 
+in do_visits 
+check_rout ?  do_visits-1 prod 
+begin do visit a part 
+after check_ops 
+at start do_visits A 
+ at 6-1  
+ at 6-1a  
+ at 6-1a  
+ at 6-0  
+ at 6 end  
+after count_op  
+after count_op A  5  
+did some arrsize 30  
+about to mem !!!  
+done pij load  
+did load pij  
+did memcpy   
+ att 2  
+did invert pij  
+got visit numbers 
+in do_visits no. of visits 0 1.000000 100.000000  
+in do_visits no. of visits 1 1.000000 100.000000  
+in do_visits no. of visits 2 -0.000000 100.000000  
+in do_visits no. of visits 3 1.000000 100.000000  
+in do_visits no. of visits 4 1.000000 100.000000  
+afte 1 do visits 
+after 1 do visits 
+in do_visits 
+set demand start 
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 2 0.225490 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 3 0.439706 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 4 0.225490 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 3 0.958333 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 5 0.175979 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 6 0.084400 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 7 0.867157 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 2 0.409882 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 3 1.136578 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 4 0.373003 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 3 1.597557 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 5 0.451270 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 6 0.188259 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 8 0.326733 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 2 0.610383 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 3 1.774363 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 4 0.593555 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 3 1.955725 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 5 0.705254 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 6 0.201990 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 7 1.033387 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 2 0.771447 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 3 2.111421 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 4 0.706300 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 3 2.497976 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 5 0.744469 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 6 0.258012 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 8 0.690470 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 2 1.551617 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 5 1.822191 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 2 1.560326 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 5 1.825094 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 2 1.562068 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 5 1.825675 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 2 1.807560 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 5 2.057139 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 2 0.013106 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 3 0.007685 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 4 0.043659 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 5 0.014306 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 6 0.015949 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 7 0.006358 
+  
+TESTING:
+ 
+xxxx  inside mpc ...
+ eqname 8 0.004248 
+  
+TESTING:
+ 
+xxxx  inside lextra  levelling...
+ eqname 3 0.094310 0.131777 
+  
+TESTING:
+ 
+xxxx  inside lextra  levelling...
+ eqname 7 0.078030 0.131777 
+  
+TESTING:
+ 
+xxxx  inside lextra  levelling...
+ eqname 8 0.052137 0.131777 
+  
+TESTING:
+ 
+xxxx  inside lextra  levelling...
+ eqname 5 0.161351 0.271627 
+  
+mpcalc starting mct calc !! 
+do local mpcalc start 
+end mpcalc  util !! 
+mpcalc totaling mct calc !! 
+end mpcalc 
+about write_results in run it 
+ 
+in write_results 
+ 
+ part name 1  icount 0 10  
+about to test opnum  
+ part name 1  icount 3  10, 1-4  
+about to test opnum  
+ part name 1  icount 4  20, 1-5  
+about to test opnum  
+ part name 1  icount 5  30, 1-6  
+about to test opnum  
+ part name 1  icount 6  40, 1-7  
+about to test opnum  
+ part name 1  icount 7  50, 1-8  
+about to test opnum  
+ part name 1  icount 8  60, 1-9  
+about to test opnum  
+ part name 1  icount 9  70, 1-10  
+ part name 2  icount 10 10  
+about to test opnum  
+ part name 2  icount 13  10, 2-14  
+about to test opnum  
+ part name 2  icount 14  20, 2-15  
+about to test opnum  
+ part name 2  icount 15  30, 2-16  
+about to test opnum  
+ part name 2  icount 16  40, 2-17  
+about to test opnum  
+ part name 2  icount 17  50, 2-18  
+about to test opnum  
+ part name 2  icount 18  60, 2-19  
+about to test opnum  
+ part name 2  icount 19  70, 2-20  
+ part name 3  icount 20 10  
+about to test opnum  
+ part name 3  icount 23  10, 3-24  
+about to test opnum  
+ part name 3  icount 24  20, 3-25  
+about to test opnum  
+ part name 3  icount 25  30, 3-26  
+about to test opnum  
+ part name 3  icount 26  40, 3-27  
+about to test opnum  
+ part name 3  icount 27  50, 3-28  
+about to test opnum  
+ part name 3  icount 28  60, 3-29  
+about to test opnum  
+ part name 3  icount 29  70, 3-30  
+ part name 4  icount 30 10  
+about to test opnum  
+ part name 4  icount 33  10, 4-34  
+about to test opnum  
+ part name 4  icount 34  20, 4-35  
+about to test opnum  
+ part name 4  icount 35  30, 4-36  
+about to test opnum  
+ part name 4  icount 36  40, 4-37  
+about to test opnum  
+ part name 4  icount 37  50, 4-38  
+about to test opnum  
+ part name 4  icount 38  60, 4-39  
+about to test opnum  
+ part name 4  icount 39  70, 4-40  
+ part name 5  icount 40 5  
+about to test opnum  
+ part name 5  icount 43  10, 5-44  
+about to test opnum  
+ part name 5  icount 44  20, 5-45  
+ part name 6  icount 45 5  
+about to test opnum  
+ part name 6  icount 48  10, 6-49  
+about to test opnum  
+ part name 6  icount 49  20, 6-50  
+ part name 7  icount 50 5  
+about to test opnum  
+ part name 7  icount 53  10, 7-54  
+about to test opnum  
+ part name 7  icount 54  20, 7-55  
+ part name 8  icount 55 5  
+about to test opnum  
+ part name 8  icount 58  10, 8-59  
+about to test opnum  
+ part name 8  icount 59  20, 8-60  
+in to clear c1 
+in to clear c1 before oper 1 
+in to clear c1  after route  
+in to clear c1  after extras   
+out of clear c1 

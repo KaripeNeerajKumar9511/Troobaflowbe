@@ -1,0 +1,1143 @@
+from __future__ import annotations
+
+import csv
+import json
+import os
+import shutil
+import tempfile
+from collections import defaultdict
+from copy import deepcopy
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+from standalone_dll_json_runner import run_model_from_json
+
+
+def _to_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return False
+
+
+def _clean_csv_value(value: Any) -> str:
+    return str(value).strip() if value is not None else ""
+
+
+def _read_csv_rows(path: Path) -> List[Dict[str, str]]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+        reader = csv.DictReader(handle, skipinitialspace=True)
+        rows: List[Dict[str, str]] = []
+        for row in reader:
+            if not row:
+                continue
+            rows.append({k: _clean_csv_value(v) for k, v in row.items() if k})
+        return rows
+
+
+def _read_results_err(path: Path) -> List[str]:
+    if not path.exists():
+        return []
+    lines: List[str] = []
+    with path.open("r", encoding="utf-8", errors="ignore") as handle:
+        for idx, line in enumerate(handle):
+            clean = line.strip()
+            if not clean or idx == 0:
+                continue
+            lines.append(clean)
+    return lines
+
+
+def _safe_preview(path: Path, max_lines: int = 8) -> List[str]:
+    if not path.exists():
+        return []
+    preview: List[str] = []
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            for idx, line in enumerate(handle):
+                if idx >= max_lines:
+                    break
+                preview.append(line.rstrip("\n"))
+    except OSError:
+        return []
+    return preview
+
+
+def _persist_failure_artifacts(temp_dir: Path) -> Optional[str]:
+    root = Path(__file__).resolve().parents[2] / "tmp" / "dll_failures"
+    root.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+    target = root / f"run_{stamp}"
+    try:
+        shutil.copytree(temp_dir, target)
+    except OSError:
+        return None
+    return str(target)
+
+
+def _persist_input_debug_artifacts(
+    model_from_db: Dict[str, Any],
+    model_after_scenario: Dict[str, Any],
+    model_for_dll_contract: Dict[str, Any],
+    dll_payload: Dict[str, Any],
+) -> Optional[str]:
+    root = Path(__file__).resolve().parents[2] / "tmp" / "dll_inputs"
+    root.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+    target = root / f"run_{stamp}"
+    try:
+        target.mkdir(parents=True, exist_ok=False)
+        (target / "model_from_db.json").write_text(
+            json.dumps(model_from_db, ensure_ascii=True, indent=2),
+            encoding="utf-8",
+        )
+        (target / "model_after_scenario.json").write_text(
+            json.dumps(model_after_scenario, ensure_ascii=True, indent=2),
+            encoding="utf-8",
+        )
+        (target / "model_for_dll_contract.json").write_text(
+            json.dumps(model_for_dll_contract, ensure_ascii=True, indent=2),
+            encoding="utf-8",
+        )
+        (target / "dll_payload.json").write_text(
+            json.dumps(dll_payload, ensure_ascii=True, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        return None
+    return str(target)
+
+
+def _sanitize(value: float) -> float:
+    if value != value or value in (float("inf"), float("-inf")):
+        return 0.0
+    return value
+
+
+def _pick_float(row: Dict[str, str], *keys: str, default: float = 0.0) -> float:
+    """
+    Return first parsable float from any candidate DLL column name.
+    """
+    for key in keys:
+        if key in row and str(row.get(key, "")).strip() != "":
+            return _to_float(row.get(key), default)
+    return default
+
+
+def _convert_model_to_mpx_contract(model: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Convert DB model to stable MPX-style contract before DLL payload build.
+    Mirrors the user's CSV->JSON shape (labor-*, equip-*, prod-* ids and fields).
+    """
+    general = deepcopy(model.get("general") or {})
+    labor_src = deepcopy(model.get("labor") or [])
+    equip_src = deepcopy(model.get("equipment") or [])
+    prod_src = deepcopy(model.get("products") or [])
+    oper_src = deepcopy(model.get("operations") or [])
+    route_src = deepcopy(model.get("routing") or [])
+    ibom_src = deepcopy(model.get("ibom") or [])
+
+    labor_id_map: Dict[str, str] = {}
+    labor_out: List[Dict[str, Any]] = []
+    for idx, row in enumerate(labor_src, start=1):
+        old_id = str(row.get("id") or "")
+        new_id = f"labor-{idx}"
+        labor_id_map[old_id] = new_id
+        labor_out.append(
+            {
+                "id": new_id,
+                "name": str(row.get("name") or "").strip(),
+                "count": _to_float(row.get("count"), 1.0),
+                "overtime_pct": _to_float(row.get("overtime_pct"), 0.0),
+                "unavail_pct": _to_float(row.get("unavail_pct"), 0.0),
+                "setup_factor": _to_float(row.get("setup_factor"), 1.0),
+                "run_factor": _to_float(row.get("run_factor"), 1.0),
+                "var_factor": _to_float(row.get("var_factor"), 1.0),
+                "flag": _to_int(row.get("flag"), 0),
+            }
+        )
+
+    equip_id_map: Dict[str, str] = {}
+    equip_out: List[Dict[str, Any]] = []
+    for idx, row in enumerate(equip_src, start=1):
+        old_id = str(row.get("id") or "")
+        new_id = f"equip-{idx}"
+        equip_id_map[old_id] = new_id
+        src_labor_id = str(row.get("labor_group_id") or "")
+        equip_out.append(
+            {
+                "id": new_id,
+                "name": str(row.get("name") or "").strip(),
+                "equip_type": str(row.get("equip_type") or "standard"),
+                "count": _to_int(row.get("count"), 1),
+                "mttf": _to_float(row.get("mttf"), 1.0),
+                "mttr": _to_float(row.get("mttr"), 1.0),
+                "overtime_pct": _to_float(row.get("overtime_pct"), 0.0),
+                "labor_group_id": labor_id_map.get(src_labor_id, "labor-0"),
+                "setup_factor": _to_float(row.get("setup_factor"), 1.0),
+                "run_factor": _to_float(row.get("run_factor"), 1.0),
+                "var_factor": _to_float(row.get("var_factor"), 1.0),
+                # Per requirement: send 0 when true, else -1.
+                "cell_id": 0 if _to_bool(row.get("cell_id")) else -1,
+            }
+        )
+
+    prod_id_map: Dict[str, str] = {}
+    prod_out: List[Dict[str, Any]] = []
+    for idx, row in enumerate(prod_src, start=1):
+        old_id = str(row.get("id") or "")
+        new_id = f"prod-{idx}"
+        prod_id_map[old_id] = new_id
+        tbatch = _to_float(row.get("tbatch_size"), 1.0)
+        # Preserve -1 sentinel (means "use lot size") for DLL payload.
+        # Any other non-positive value is coerced to 1.0.
+        tbatch_mapped = -1.0 if tbatch == -1.0 else (tbatch if tbatch > 0 else 1.0)
+        prod_out.append(
+            {
+                "id": new_id,
+                "name": str(row.get("name") or "").strip(),
+                "demand": max(_to_float(row.get("demand"), 0.0), 0.0),
+                "lot_size": max(_to_float(row.get("lot_size"), 1.0), 1.0),
+                "tbatch_size": tbatch_mapped,
+                "setup_factor": _to_float(row.get("setup_factor"), 1.0),
+                "var_factor": _to_float(row.get("var_factor"), 1.0),
+                "tbatch_gather": _to_int(row.get("tbatch_gather", row.get("gather_tbatches")), 0),
+                "flag": _to_int(row.get("flag"), 1),
+            }
+        )
+
+    oper_out: List[Dict[str, Any]] = []
+    for row in oper_src:
+        src_pid = str(row.get("product_id") or "")
+        src_eid = str(row.get("equip_id") or "")
+        op_name = str(row.get("op_name") or "").strip().upper()
+        is_meta = op_name in _ROUTING_META
+        oper_out.append(
+            {
+                "product_id": prod_id_map.get(src_pid, src_pid),
+                "op_name": op_name,
+                "op_number": _to_int(row.get("op_number"), 0),
+                "equip_id": "" if is_meta else equip_id_map.get(src_eid, ""),
+                "pct_assigned": _to_float(row.get("pct_assigned"), 100.0),
+                "equip_setup_lot": _to_float(row.get("equip_setup_lot"), 0.0),
+                "equip_setup_tbatch": _to_float(row.get("equip_setup_tbatch"), 0.0),
+                "equip_setup_piece": _to_float(row.get("equip_setup_piece"), 0.0),
+                "equip_run_lot": _to_float(row.get("equip_run_lot"), 0.0),
+                "equip_run_tbatch": _to_float(row.get("equip_run_tbatch"), 0.0),
+                "equip_run_piece": _to_float(row.get("equip_run_piece"), 0.0),
+                "labor_setup_lot": _to_float(row.get("labor_setup_lot"), 0.0),
+                "labor_setup_tbatch": _to_float(row.get("labor_setup_tbatch"), 0.0),
+                "labor_setup_piece": _to_float(row.get("labor_setup_piece"), 0.0),
+                "labor_run_lot": _to_float(row.get("labor_run_lot"), 0.0),
+                "labor_run_tbatch": _to_float(row.get("labor_run_tbatch"), 0.0),
+                "labor_run_piece": _to_float(row.get("labor_run_piece"), 0.0),
+                "flag": _to_int(row.get("flag"), 0),
+            }
+        )
+
+    route_out: List[Dict[str, Any]] = []
+    for row in route_src:
+        src_pid = str(row.get("product_id") or "")
+        route_out.append(
+            {
+                "product_id": prod_id_map.get(src_pid, src_pid),
+                "from_op_name": str(row.get("from_op_name") or "").strip().upper(),
+                "to_op_name": str(row.get("to_op_name") or "").strip().upper(),
+                "pct_routed": _to_float(row.get("pct_routed"), 0.0),
+            }
+        )
+
+    ibom_out: List[Dict[str, Any]] = []
+    for row in ibom_src:
+        parent_src = str(row.get("parent_product_id") or "")
+        comp_src = str(row.get("component_product_id") or "")
+        ibom_out.append(
+            {
+                "parent_product_id": prod_id_map.get(parent_src, parent_src),
+                "component_product_id": prod_id_map.get(comp_src, comp_src),
+                "units_per_assy": _to_float(row.get("units_per_assy"), 0.0),
+            }
+        )
+
+    return {
+        "general": general,
+        "labor": labor_out,
+        "equipment": equip_out,
+        "products": prod_out,
+        "operations": oper_out,
+        "routing": route_out,
+        "ibom": ibom_out,
+    }
+
+
+def _apply_scenario(model: Dict[str, Any], scenario: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not scenario or not scenario.get("changes"):
+        return deepcopy(model)
+
+    result = deepcopy(model)
+    for change in scenario.get("changes", []):
+        data_type = change.get("dataType")
+        entity_id = change.get("entityId")
+        field = change.get("field")
+        value = change.get("whatIfValue")
+
+        target_list = {
+            "Labor": "labor",
+            "Equipment": "equipment",
+            "Product": "products",
+            "Routing": "routing",
+        }.get(data_type)
+
+        if target_list:
+            for item in result.get(target_list, []):
+                if item.get("id") == entity_id:
+                    if data_type == "Product" and field == "included" and str(value).lower() == "false":
+                        item["demand"] = 0
+                    elif data_type == "Routing":
+                        item[field] = _to_float(value, 0.0) if value is not None else 0.0
+                    else:
+                        item[field] = value
+                    break
+        elif data_type == "Product Inclusion" and str(value).lower() in {"no", "false"}:
+            for product in result.get("products", []):
+                if product.get("id") == entity_id:
+                    product["demand"] = 0
+                    break
+    return result
+
+
+def _coerce_route_pct(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _first_present(row: Dict[str, Any], keys: Tuple[str, ...]) -> Any:
+    for k in keys:
+        if k in row and row[k] is not None:
+            return row[k]
+    return None
+
+
+def _coerce_single_routing_row(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Map one routing edge to test4.json shape: product_id, from_op_name, to_op_name, pct_routed."""
+    pid = _first_present(row, ("product_id", "productId"))
+    if pid is None:
+        return None
+    frm = _first_present(row, ("from_op_name", "fromOpName", "from_operation"))
+    to = _first_present(row, ("to_op_name", "toOpName", "to_operation"))
+    if frm is None or to is None:
+        return None
+    pct = _first_present(row, ("pct_routed", "pctRouted", "probability"))
+    return {
+        "product_id": str(pid),
+        "from_op_name": str(frm).strip(),
+        "to_op_name": str(to).strip(),
+        "pct_routed": _coerce_route_pct(pct),
+    }
+
+
+def normalize_routing_rows_for_dll(raw: Any) -> List[Dict[str, Any]]:
+    """
+    Flatten nested routing payloads and coerce field names to the list format used by test4.json
+    and standalone_dll_json_runner (snake_case + pct_routed 0..100).
+    """
+    if not raw:
+        return []
+    if not isinstance(raw, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        entries = item.get("entries")
+        if entries is not None and isinstance(entries, list):
+            pid = _first_present(item, ("product_id", "productId"))
+            if pid is None:
+                continue
+            for e in entries:
+                if not isinstance(e, dict):
+                    continue
+                merged = {**e, "product_id": pid}
+                row = _coerce_single_routing_row(merged)
+                if row:
+                    out.append(row)
+            continue
+        row = _coerce_single_routing_row(item)
+        if row:
+            out.append(row)
+    return out
+
+
+_ROUTING_META = frozenset({"DOCK", "STOCK", "SCRAP"})
+
+
+def _op_name_upper(value: Any) -> str:
+    return str(value or "").strip().upper()
+
+
+def _with_dummy_labor_and_equipment(
+    labor: List[Dict[str, Any]],
+    equipment: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    DLL contract expects one dummy labor + equipment row before real records.
+    Keep IDs stable and prepend deterministic dummy rows.
+    """
+    dummy_labor_id = "__DUMMY_LABOR__"
+    dummy_equip_id = "__DUMMY_EQUIP__"
+    labor_out = [
+        {
+            "id": dummy_labor_id,
+            "name": "DUMMY_LABOR",
+            "count": -1,
+            "overtime_pct": 0,
+            "unavail_pct": 0,
+            "setup_factor": 1,
+            "run_factor": 1,
+            "var_factor": 1,
+            "prioritize_use": False,
+        },
+        *labor,
+    ]
+    equipment_out = [
+        {
+            "id": dummy_equip_id,
+            "name": "DUMMY_EQUIP",
+            "equip_type": "standard",
+            "count": -1,
+            "mttf": 1.0,
+            "mttr": 0.0,
+            "overtime_pct": 0,
+            "labor_group_id": dummy_labor_id,
+            "unavail_pct": 0,
+            "setup_factor": 1,
+            "run_factor": 1,
+            "var_factor": 1,
+        },
+        *equipment,
+    ]
+    return labor_out, equipment_out
+
+
+def normalize_operations_for_dll(
+    products: List[Dict[str, Any]],
+    operations: Any,
+    equipment: Any,
+) -> List[Dict[str, Any]]:
+    """
+    Canonicalize operation rows to test4.json-style payload expected by the DLL.
+    Ensures each product has DOCK/STOCK/SCRAP and stable op_number semantics.
+    """
+    default_equip_id = ""
+    if isinstance(equipment, list) and equipment:
+        first = equipment[0]
+        if isinstance(first, dict):
+            default_equip_id = str(first.get("id") or "")
+
+    def _op_row(pid: str, name: str, op_number: int, src: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        src = src or {}
+        equip_id = str(src.get("equip_id") or "")
+        # Keep meta routing ops (DOCK/STOCK/SCRAP) unassigned.
+        # Legacy DLL routing solver expects these as structural nodes, not real equipment steps.
+        if name in _ROUTING_META:
+            equip_id = ""
+        return {
+            "product_id": pid,
+            "op_name": name,
+            "op_number": _to_int(src.get("op_number"), op_number),
+            "equip_id": equip_id,
+            "pct_assigned": float(src.get("pct_assigned", 100.0) or 100.0),
+            "equip_setup_lot": _to_float(src.get("equip_setup_lot"), 0.0),
+            "equip_setup_tbatch": _to_float(src.get("equip_setup_tbatch"), 0.0),
+            "equip_setup_piece": _to_float(src.get("equip_setup_piece"), 0.0),
+            "equip_run_lot": _to_float(src.get("equip_run_lot"), 0.0),
+            "equip_run_tbatch": _to_float(src.get("equip_run_tbatch"), 0.0),
+            "equip_run_piece": _to_float(src.get("equip_run_piece"), 0.0),
+            "labor_setup_lot": _to_float(src.get("labor_setup_lot"), 0.0),
+            "labor_setup_tbatch": _to_float(src.get("labor_setup_tbatch"), 0.0),
+            "labor_setup_piece": _to_float(src.get("labor_setup_piece"), 0.0),
+            "labor_run_lot": _to_float(src.get("labor_run_lot"), 0.0),
+            "labor_run_tbatch": _to_float(src.get("labor_run_tbatch"), 0.0),
+            "labor_run_piece": _to_float(src.get("labor_run_piece"), 0.0),
+            "flag": 1,
+            "oper1": 0,
+            "oper2": 0,
+            "oper3": 0,
+            "oper4": 0,
+        }
+
+    by_pid: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for o in operations or []:
+        if not isinstance(o, dict):
+            continue
+        pid = str(o.get("product_id") or "")
+        if not pid:
+            continue
+        by_pid[pid].append(o)
+
+    normalized: List[Dict[str, Any]] = []
+    for p in products:
+        pid = str(p.get("id") or "")
+        if not pid:
+            continue
+        product_ops = by_pid.get(pid, [])
+        by_name: Dict[str, Dict[str, Any]] = {}
+        for op in product_ops:
+            name = _op_name_upper(op.get("op_name"))
+            if not name:
+                continue
+            if name not in by_name:
+                cloned = dict(op)
+                cloned["op_name"] = name
+                by_name[name] = cloned
+
+        dock = _op_row(pid, "DOCK", 0, by_name.get("DOCK"))
+        stock = _op_row(pid, "STOCK", 10000, by_name.get("STOCK"))
+        scrap = _op_row(pid, "SCRAP", 10001, by_name.get("SCRAP"))
+        stock["op_number"] = 10000
+        scrap["op_number"] = 10001
+
+        real_ops: List[Dict[str, Any]] = []
+        for name, src in by_name.items():
+            if name in _ROUTING_META:
+                continue
+            real_ops.append(_op_row(pid, name, _to_int(src.get("op_number"), 0), src))
+        real_ops.sort(key=lambda op: (_to_int(op.get("op_number"), 0), op.get("op_name", "")))
+
+        normalized.extend([dock, stock, scrap, *real_ops])
+
+    return normalized
+
+
+def normalize_routing_against_operations_for_dll(
+    products: List[Dict[str, Any]],
+    operations: List[Dict[str, Any]],
+    routing: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    product_ids = {str(p.get("id")) for p in products if p.get("id") is not None}
+    valid_op_names: Dict[str, Set[str]] = defaultdict(set)
+    for op in operations:
+        pid = str(op.get("product_id") or "")
+        name = _op_name_upper(op.get("op_name"))
+        if pid and name:
+            valid_op_names[pid].add(name)
+
+    out: List[Dict[str, Any]] = []
+    for r in routing:
+        pid = str(r.get("product_id") or "")
+        frm = _op_name_upper(r.get("from_op_name"))
+        to = _op_name_upper(r.get("to_op_name"))
+        if not pid or pid not in product_ids:
+            continue
+        if not frm or not to:
+            continue
+        if frm not in valid_op_names[pid] or to not in valid_op_names[pid]:
+            continue
+        out.append(
+            {
+                "product_id": pid,
+                "from_op_name": frm,
+                "to_op_name": to,
+                "pct_routed": _coerce_route_pct(r.get("pct_routed")),
+            }
+        )
+    return out
+
+
+def _operations_for_product(operations: Any, product_id: str) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for o in operations or []:
+        if not isinstance(o, dict):
+            continue
+        if str(o.get("product_id", "")) != str(product_id):
+            continue
+        out.append(o)
+    return out
+
+
+def _op_names_upper_for_product(operations: Any, product_id: str) -> Set[str]:
+    names: Set[str] = set()
+    for o in _operations_for_product(operations, product_id):
+        n = str(o.get("op_name", "")).strip().upper()
+        if n:
+            names.add(n)
+    return names
+
+
+def _first_real_operation_name(operations: Any, product_id: str) -> Optional[str]:
+    real: List[Dict[str, Any]] = []
+    for o in _operations_for_product(operations, product_id):
+        n = str(o.get("op_name", "")).strip().upper()
+        if not n or n in _ROUTING_META:
+            continue
+        real.append(o)
+    if not real:
+        return None
+    real.sort(key=lambda op: (_to_int(op.get("op_number"), 10**9), str(op.get("op_name", ""))))
+    return str(real[0].get("op_name", "")).strip()
+
+
+def repair_routing_for_dll(
+    products: Any,
+    operations: Any,
+    routing: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    MPX/DLL routing graph must leave DOCK and must have ~100% flow from each branch point.
+    UI/DB data often omits DOCK->first op (starts at UNPACK) or under-fills INSPECT splits.
+    """
+    rows: List[Dict[str, Any]] = [dict(r) for r in routing]
+    product_ids = [str(p.get("id")) for p in (products or []) if isinstance(p, dict) and p.get("id") is not None]
+
+    for pid in product_ids:
+        has_from_dock = any(
+            str(r.get("product_id", "")) == pid and str(r.get("from_op_name", "")).strip().upper() == "DOCK"
+            for r in rows
+        )
+        if has_from_dock:
+            continue
+        first = _first_real_operation_name(operations, pid)
+        if not first:
+            continue
+        rows.append({"product_id": pid, "from_op_name": "DOCK", "to_op_name": first, "pct_routed": 100.0})
+
+    groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for r in rows:
+        pid = str(r.get("product_id", ""))
+        frm_u = str(r.get("from_op_name", "")).strip().upper()
+        if not pid or not frm_u:
+            continue
+        groups[(pid, frm_u)].append(r)
+
+    op_names_by_pid: Dict[str, Set[str]] = {
+        pid: _op_names_upper_for_product(operations, pid) for pid in product_ids
+    }
+    for (pid, frm_u), group in groups.items():
+        total = sum(_coerce_route_pct(r.get("pct_routed")) for r in group)
+        if total <= 0:
+            continue
+        if total > 100.0 + 0.25:
+            scale = 100.0 / total
+            for r in group:
+                r["pct_routed"] = round(_coerce_route_pct(r.get("pct_routed")) * scale, 6)
+            total = sum(_coerce_route_pct(r.get("pct_routed")) for r in group)
+        if total < 99.75:
+            remainder = round(100.0 - total, 6)
+            if remainder <= 0:
+                continue
+            op_names = op_names_by_pid.get(pid, set())
+            sink_u = "SCRAP" if "SCRAP" in op_names else ("STOCK" if "STOCK" in op_names else None)
+            if not sink_u or frm_u == sink_u:
+                continue
+            from_display = str(group[0].get("from_op_name", "")).strip() or frm_u
+            rows.append(
+                {
+                    "product_id": pid,
+                    "from_op_name": from_display,
+                    "to_op_name": sink_u,
+                    "pct_routed": remainder,
+                }
+            )
+
+    groups = defaultdict(list)
+    for r in rows:
+        pid = str(r.get("product_id", ""))
+        frm_u = str(r.get("from_op_name", "")).strip().upper()
+        if pid and frm_u:
+            groups[(pid, frm_u)].append(r)
+    for pid in product_ids:
+        op_names = op_names_by_pid.get(pid, set())
+        sink_u = "STOCK" if "STOCK" in op_names else ("SCRAP" if "SCRAP" in op_names else None)
+        if not sink_u:
+            continue
+        for frm_u in op_names:
+            if frm_u in {"STOCK", "SCRAP"}:
+                continue
+            if groups.get((pid, frm_u)):
+                continue
+            rows.append(
+                {
+                    "product_id": pid,
+                    "from_op_name": frm_u,
+                    "to_op_name": sink_u,
+                    "pct_routed": 100.0,
+                }
+            )
+
+    return rows
+
+
+def canonicalize_routing_for_dll(
+    products: List[Dict[str, Any]],
+    operations: List[Dict[str, Any]],
+    routing: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    Stabilize routing rows for legacy DLL expectations:
+    - merge duplicate (product, from, to) edges
+    - deterministic ordering by product and op_number
+    """
+    product_order: Dict[str, int] = {
+        str(p.get("id")): idx for idx, p in enumerate(products)
+    }
+    op_order: Dict[Tuple[str, str], int] = {}
+    for op in operations:
+        pid = str(op.get("product_id") or "")
+        opn = _op_name_upper(op.get("op_name"))
+        if not pid or not opn:
+            continue
+        op_order[(pid, opn)] = _to_int(op.get("op_number"), 10**9)
+
+    merged: Dict[Tuple[str, str, str], float] = defaultdict(float)
+    for r in routing:
+        pid = str(r.get("product_id") or "")
+        frm = _op_name_upper(r.get("from_op_name"))
+        to = _op_name_upper(r.get("to_op_name"))
+        if not pid or not frm or not to:
+            continue
+        merged[(pid, frm, to)] += _coerce_route_pct(r.get("pct_routed"))
+
+    rows: List[Dict[str, Any]] = []
+    for (pid, frm, to), pct in merged.items():
+        if pct <= 0:
+            continue
+        rows.append(
+            {
+                "product_id": pid,
+                "from_op_name": frm,
+                "to_op_name": to,
+                "pct_routed": round(pct, 6),
+            }
+        )
+
+    rows.sort(
+        key=lambda r: (
+            product_order.get(str(r.get("product_id")), 10**9),
+            op_order.get((str(r.get("product_id")), _op_name_upper(r.get("from_op_name"))), 10**9),
+            op_order.get((str(r.get("product_id")), _op_name_upper(r.get("to_op_name"))), 10**9),
+            _op_name_upper(r.get("from_op_name")),
+            _op_name_upper(r.get("to_op_name")),
+        )
+    )
+    return rows
+
+
+def _build_dll_model_payload(model: Dict[str, Any]) -> Dict[str, Any]:
+    routing_src = model.get("routing") or []
+    products = deepcopy(model.get("products") or [])
+    labor = deepcopy(model.get("labor") or [])
+    equipment = deepcopy(model.get("equipment") or [])
+    labor_with_dummy, equipment_with_dummy = _with_dummy_labor_and_equipment(labor, equipment)
+    operations = normalize_operations_for_dll(products, deepcopy(model.get("operations") or []), equipment)
+    routing_norm = normalize_routing_rows_for_dll(routing_src)
+    routing_clean = normalize_routing_against_operations_for_dll(products, operations, routing_norm)
+    routing_fixed = repair_routing_for_dll(products, operations, routing_clean)
+    routing_canonical = canonicalize_routing_for_dll(products, operations, routing_fixed)
+    return {
+        "general": deepcopy(model.get("general") or {}),
+        "labor": labor_with_dummy,
+        "equipment": equipment_with_dummy,
+        "products": products,
+        "operations": operations,
+        "routing": routing_canonical,
+        "ibom": deepcopy(model.get("ibom") or []),
+    }
+
+
+def _validate_model(model: Dict[str, Any]) -> None:
+    required_lists = ("products", "operations")
+    for field in required_lists:
+        if not model.get(field):
+            raise ValueError(f"Model missing required section: '{field}'")
+
+
+def _result_row_map(rows: List[Dict[str, str]], key_field: str) -> Dict[int, Dict[str, str]]:
+    mapped: Dict[int, Dict[str, str]] = {}
+    for row in rows:
+        key = _to_int(row.get(key_field), 0)
+        if key > 0:
+            mapped[key] = row
+    return mapped
+
+
+def _build_equipment_results(
+    model: Dict[str, Any],
+    eq_rows: List[Dict[str, str]],
+    index_offset: int = 0,
+) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+    by_idx = _result_row_map(eq_rows, "EquipID")
+    for idx, equipment in enumerate(model.get("equipment") or [], start=1):
+        dll_idx = idx + index_offset
+        row = by_idx.get(dll_idx, {})
+        eq_count = _to_int(equipment.get("count"), 0)
+        setup = _to_float(row.get("SetupUtil"), 0.0)
+        run = _to_float(row.get("RunUtil"), 0.0)
+        repair = _to_float(row.get("RepUtil"), 0.0)
+        wait_labor = _to_float(row.get("LabWaitUtil"), 0.0)
+        total = _sanitize(setup + run + repair + wait_labor)
+        idle = _to_float(row.get("Idle"), max(0.0, 100.0 - total))
+        machines_tended = _pick_float(
+            row,
+            "MachinesTended",
+            "machinesTended",
+            "EqMachinesTended",
+            default=min(1.0, max(0.0, (setup + run) / 100.0)) * max(eq_count, 0),
+        )
+        machines_waiting = _pick_float(
+            row,
+            "MachinesWaiting",
+            "machinesWaiting",
+            "EqMachinesWaiting",
+            default=max(0.0, wait_labor / 100.0) * max(eq_count, 0),
+        )
+        result.append(
+            {
+                "id": equipment.get("id"),
+                "name": equipment.get("name", f"Equipment {idx}"),
+                "count": eq_count,
+                "laborGroupId": equipment.get("labor_group_id"),
+                "setupUtil": _sanitize(setup),
+                "runUtil": _sanitize(run),
+                "repairUtil": _sanitize(repair),
+                "waitLaborUtil": _sanitize(wait_labor),
+                "totalUtil": _sanitize(total),
+                "idle": _sanitize(idle),
+                "machinesTended": _sanitize(machines_tended),
+                "machinesWaiting": _sanitize(machines_waiting),
+                "wip_process": _to_float(row.get("Qprocess"), 0.0),
+                "wip_queue": _to_float(row.get("QWait"), 0.0),
+                "wip_total": _to_float(row.get("Qtotal"), 0.0),
+                "wait_min": _to_float(row.get("QWait"), 0.0),
+                "visits_per_100": 0.0,
+            }
+        )
+    return result
+
+
+def _build_labor_results(
+    model: Dict[str, Any],
+    labor_rows: List[Dict[str, str]],
+    index_offset: int = 0,
+) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+    by_idx = _result_row_map(labor_rows, "LaborID")
+    for idx, labor in enumerate(model.get("labor") or [], start=1):
+        dll_idx = idx + index_offset
+        row = by_idx.get(dll_idx, {})
+        labor_count = _to_int(labor.get("count"), 0)
+        unavail_pct = _to_float(labor.get("unavail_pct"), 0.0)
+        setup = _to_float(row.get("SetupUtil"), 0.0)
+        run = _to_float(row.get("RunUtil"), 0.0)
+        abs_util = _to_float(row.get("AbsUtil"), 0.0)
+        total = _sanitize(setup + run + abs_util)
+        idle = _to_float(row.get("Idle"), max(0.0, 100.0 - total))
+        machines_tended = _pick_float(
+            row,
+            "MachinesTended",
+            "machinesTended",
+            "LabMachinesTended",
+            default=0.0,
+        )
+        machines_waiting = _pick_float(
+            row,
+            "MachinesWaiting",
+            "machinesWaiting",
+            "LabMachinesWaiting",
+            default=0.0,
+        )
+        avg_wait_labor_util = _pick_float(
+            row,
+            "AvgWaitLaborUtil",
+            "avgWaitLaborUtil",
+            "AvgWaitLabourUtil",
+            "avgWaitLabourUtil",
+            default=0.0,
+        )
+        result.append(
+            {
+                "id": labor.get("id"),
+                "name": labor.get("name", f"Labor {idx}"),
+                "count": labor_count,
+                "setupUtil": _sanitize(setup),
+                "runUtil": _sanitize(run),
+                "unavailPct": _sanitize(unavail_pct),
+                "totalUtil": _sanitize(total),
+                "idle": _sanitize(idle),
+                "wip_total": _to_float(row.get("Qtotal"), 0.0),
+                "wip_process": _to_float(row.get("Qprocess"), 0.0),
+                "wip_queue": _to_float(row.get("QWait"), 0.0),
+                "eq_cover": 0.0,
+                "fac_eq_lab": 0.0,
+                "machinesTended": _sanitize(machines_tended),
+                "machinesWaiting": _sanitize(machines_waiting),
+                "avgWaitLaborUtil": _sanitize(avg_wait_labor_util),
+            }
+        )
+    return result
+
+
+def _build_product_results(model: Dict[str, Any], prt_rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+    by_idx = _result_row_map(prt_rows, "ProdID")
+    for idx, product in enumerate(model.get("products") or [], start=1):
+        row = by_idx.get(idx, {})
+        mct = _to_float(row.get("FlowTime"), 0.0)
+        result.append(
+            {
+                "id": product.get("id"),
+                "name": product.get("name", f"Product {idx}"),
+                "wip": _to_float(row.get("WIP"), 0.0),
+                "wip_lots": 0.0,
+                "mct": mct,
+                "mctLotWait": _to_float(row.get("LTWaitLot"), 0.0),
+                "mctQueue": _to_float(row.get("LTWaitLot"), 0.0),
+                "mctWaitLabor": 0.0,
+                "mctSetup": _to_float(row.get("LTSetup"), 0.0),
+                "mctRun": _to_float(row.get("LTRun"), 0.0),
+                "w_equip": _to_float(row.get("LTEquip"), 0.0),
+                "w_labor": _to_float(row.get("LTLabor"), 0.0),
+                "w_setup": _to_float(row.get("LTSetup"), 0.0),
+                "w_run": _to_float(row.get("LTRun"), 0.0),
+                "w_lot": _to_float(row.get("LTWaitLot"), 0.0),
+                "totalGoodProd": _to_float(row.get("TotalGoodProd"), 0.0),
+                "shippedProd": _to_float(row.get("ShippedProd"), 0.0),
+                "scrap": _to_float(row.get("Scrap"), 0.0),
+            }
+        )
+    return result
+
+
+def _build_operation_results(model: Dict[str, Any], opr_rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    ops = model.get("operations") or []
+    by_pair: Dict[Tuple[int, int], Dict[str, str]] = {}
+    for row in opr_rows:
+        pid = _to_int(row.get("ProdID"), 0)
+        opid = _to_int(row.get("OpID"), 0)
+        if pid > 0 and opid > 0:
+            by_pair[(pid, opid)] = row
+
+    product_order = {str(p.get("id")): i + 1 for i, p in enumerate(model.get("products") or [])}
+    result: List[Dict[str, Any]] = []
+    for op in ops:
+        product_idx = product_order.get(str(op.get("product_id")), 0)
+        op_number = _to_int(op.get("op_number"), 0)
+        row = by_pair.get((product_idx, op_number), {})
+        result.append(
+            {
+                "product_id": op.get("product_id"),
+                "op_name": op.get("op_name"),
+                "op_number": op_number,
+                "EqRunTime": _to_float(row.get("EqRunTime"), 0.0),
+                "LabSetTime": _to_float(row.get("LabSetTime"), 0.0),
+                "LabRunTime": _to_float(row.get("LabRunTime"), 0.0),
+                "FlowTime": _to_float(row.get("FlowTime"), 0.0),
+                "WIP": _to_float(row.get("WIP"), 0.0),
+                "LTEquip": _to_float(row.get("LTEquip"), 0.0),
+                "LTLabor": _to_float(row.get("LTLabor"), 0.0),
+                "LTSetup": _to_float(row.get("LTSetup"), 0.0),
+                "LTRun": _to_float(row.get("LTRun"), 0.0),
+                "LTWaitLot": _to_float(row.get("LTWaitLot"), 0.0),
+                "VisitsPer100": _to_float(row.get("VisitsPer100"), 0.0),
+                "VisitsPerGood": _to_float(row.get("VisitsPerGood"), 0.0),
+                "AverLotSize": _to_float(row.get("AverLotSize"), 0.0),
+                "NumSetups": _to_float(row.get("NumSetups"), 0.0),
+                "ueset": _to_float(row.get("EqSetTime"), 0.0),
+                "uerun": _to_float(row.get("EqRunTime"), 0.0),
+                "ulset": _to_float(row.get("LabSetTime"), 0.0),
+                "ulrun": _to_float(row.get("LabRunTime"), 0.0),
+                "flowtime": _to_float(row.get("FlowTime"), 0.0),
+                "n_setups": _to_float(row.get("NumSetups"), 0.0),
+                "qpoper": _to_float(row.get("WIP"), 0.0),
+                "w_run": _to_float(row.get("LTRun"), 0.0),
+                "w_setup": _to_float(row.get("LTSetup"), 0.0),
+                "w_lot": _to_float(row.get("LTWaitLot"), 0.0),
+                "w_equip": _to_float(row.get("LTEquip"), 0.0),
+                "w_labor": _to_float(row.get("LTLabor"), 0.0),
+                "visit_prob": _to_float(row.get("VisitsPer100"), 0.0) / 100.0,
+                "avg_lot_size": _to_float(row.get("AverLotSize"), 0.0),
+                "visits_per_good": _to_float(row.get("VisitsPerGood"), 0.0),
+                "vpergood": _to_float(row.get("VisitsPerGood"), 0.0),
+            }
+        )
+    return result
+
+
+def _parse_dll_outputs(model: Dict[str, Any], output_dir: Path) -> Dict[str, Any]:
+    equipment_rows = _read_csv_rows(output_dir / "results.eq")
+    labor_rows = _read_csv_rows(output_dir / "results.lab")
+    product_rows = _read_csv_rows(output_dir / "results.prt")
+    operation_rows = _read_csv_rows(output_dir / "results.opr")
+    errors_raw = _read_results_err(output_dir / "results.err")
+
+    # Payload prepends one dummy labor + equipment row for DLL contract.
+    equipment_results = _build_equipment_results(model, equipment_rows, index_offset=1)
+    labor_results = _build_labor_results(model, labor_rows, index_offset=1)
+    product_results = _build_product_results(model, product_rows)
+    operation_results = _build_operation_results(model, operation_rows)
+
+    # If labor rows do not expose machine coverage columns, derive them from
+    # already parsed DLL equipment rows grouped by labor id.
+    eq_by_labor: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for eq in equipment_results:
+        lid = str(eq.get("laborGroupId") or "")
+        if lid:
+            eq_by_labor[lid].append(eq)
+    for lab in labor_results:
+        lid = str(lab.get("id") or "")
+        linked = eq_by_labor.get(lid, [])
+        has_direct_labor_cols = any(
+            _to_float(lab.get(k), 0.0) != 0.0
+            for k in ("machinesTended", "machinesWaiting", "avgWaitLaborUtil")
+        )
+        if has_direct_labor_cols:
+            continue
+        if not linked:
+            lab["machinesTended"] = 0.0
+            lab["machinesWaiting"] = 0.0
+            lab["avgWaitLaborUtil"] = 0.0
+            continue
+        lab["machinesTended"] = _sanitize(sum(_to_float(e.get("machinesTended"), 0.0) for e in linked))
+        lab["machinesWaiting"] = _sanitize(sum(_to_float(e.get("machinesWaiting"), 0.0) for e in linked))
+        lab["avgWaitLaborUtil"] = _sanitize(
+            sum(_to_float(e.get("waitLaborUtil"), 0.0) for e in linked) / max(1, len(linked))
+        )
+
+    util_limit = _to_float((model.get("general") or {}).get("util_limit"), 95.0)
+    warnings: List[str] = []
+    over_limit: List[str] = []
+    for row in equipment_results:
+        if row["totalUtil"] > util_limit:
+            warnings.append(f'Equipment "{row["name"]}" util ({row["totalUtil"]}%) > limit ({util_limit}%)')
+            over_limit.append(f'Equipment: {row["name"]} ({row["totalUtil"]}%)')
+    for row in labor_results:
+        if row["totalUtil"] > util_limit:
+            warnings.append(f'Labor "{row["name"]}" util ({row["totalUtil"]}%) > limit ({util_limit}%)')
+            over_limit.append(f'Labor: {row["name"]} ({row["totalUtil"]}%)')
+
+    return {
+        "equipment": equipment_results,
+        "labor": labor_results,
+        "products": product_results,
+        "operations": operation_results,
+        "warnings": warnings,
+        "errors": errors_raw,
+        "overLimitResources": over_limit,
+        "calculatedAt": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _has_fatal_error_rows(error_rows: List[str]) -> bool:
+    return any(row.startswith("0,") for row in error_rows)
+
+
+def _first_fatal_error_text(error_rows: List[str]) -> Optional[str]:
+    for row in error_rows:
+        if not row.startswith("0,"):
+            continue
+        parts = [p.strip() for p in row.split(",")]
+        if len(parts) >= 3 and parts[2]:
+            return parts[2]
+        return row
+    return None
+
+
+@dataclass
+class DllRunDiagnostics(Exception):
+    message: str
+    diagnostics: Dict[str, Any]
+
+    def __str__(self) -> str:
+        return self.message
+
+
+def run_full_calculate_via_dll(model: Dict[str, Any], scenario: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if not model:
+        raise ValueError("Missing 'model' in body")
+
+    model_with_scenario = _apply_scenario(model, scenario)
+    _validate_model(model_with_scenario)
+    model_for_dll_contract = _convert_model_to_mpx_contract(model_with_scenario)
+    payload = _build_dll_model_payload(model_for_dll_contract)
+    persisted_input_dir = _persist_input_debug_artifacts(
+        model,
+        model_with_scenario,
+        model_for_dll_contract,
+        payload,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="rmct_dll_") as tmp:
+        output_dir = Path(tmp)
+        input_json_path = output_dir / "model_input.json"
+        input_json_path.write_text(
+            __import__("json").dumps(payload, ensure_ascii=True, indent=2),
+            encoding="utf-8",
+        )
+
+        try:
+            rc, used_mode = run_model_from_json(str(input_json_path), output_dir=str(output_dir), routing_mode="auto")
+        except Exception as exc:
+            persisted_dir = _persist_failure_artifacts(output_dir)
+            raise DllRunDiagnostics(
+                "DLL execution failed before producing results.",
+                {
+                    "stage": "run_model_from_json",
+                    "inputJsonPath": str(input_json_path),
+                    "outputDir": str(output_dir),
+                    "persistedInputDir": persisted_input_dir,
+                    "persistedOutputDir": persisted_dir,
+                    "errorType": type(exc).__name__,
+                    "errorMessage": str(exc),
+                },
+            ) from exc
+
+        parsed = _parse_dll_outputs(model_with_scenario, output_dir)
+        if rc != 0 and _has_fatal_error_rows(parsed.get("errors", [])):
+            persisted_dir = _persist_failure_artifacts(output_dir)
+            fatal_text = _first_fatal_error_text(parsed.get("errors", []))
+            msg = f"DLL returned non-zero status code: {rc}"
+            if fatal_text:
+                msg = f"{msg} ({fatal_text})"
+            raise DllRunDiagnostics(
+                msg,
+                {
+                    "stage": "dll_return_code",
+                    "returnCode": rc,
+                    "routingModeUsed": used_mode,
+                    "inputJsonPath": str(input_json_path),
+                    "outputDir": str(output_dir),
+                    "persistedInputDir": persisted_input_dir,
+                    "resultErrors": parsed.get("errors", []),
+                    "resultsErrPreview": _safe_preview(output_dir / "results.err"),
+                    "persistedOutputDir": persisted_dir,
+                },
+            )
+        if rc != 0:
+            parsed.setdefault("warnings", []).append(
+                f"DLL returned non-zero code ({rc}) but produced usable outputs without fatal results.err entries."
+            )
+        parsed["debugInputDir"] = persisted_input_dir
+        return parsed
