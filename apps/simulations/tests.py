@@ -259,7 +259,157 @@ class DllServiceTests(SimpleTestCase):
 
         results = run_full_calculate_via_dll(SAMPLE_MODEL)
         self.assertIn("warnings", results)
-        self.assertTrue(any("non-zero code (-1)" in w for w in results["warnings"]))
+        self.assertFalse(
+            any("non-zero code" in str(w).lower() for w in results["warnings"]),
+            "Benign DLL exit codes should not add confusing warnings when outputs are valid.",
+        )
+
+    @mock.patch("apps.simulations.dll_full_calculate.run_model_from_json")
+    @mock.patch("apps.simulations.dll_full_calculate._parse_dll_outputs")
+    def test_retries_on_dll_exception_and_returns_successful_attempt(self, parse_outputs_mock, run_model_mock):
+        run_model_mock.side_effect = [RuntimeError("transient"), (0, "auto")]
+        parse_outputs_mock.return_value = {
+            "equipment": [],
+            "labor": [],
+            "products": [],
+            "operations": [],
+            "warnings": [],
+            "errors": [],
+            "overLimitResources": [],
+            "calculatedAt": "now",
+        }
+
+        results = run_full_calculate_via_dll(SAMPLE_MODEL)
+        self.assertEqual(run_model_mock.call_count, 2)
+        self.assertFalse(any("retry attempt" in str(w).lower() for w in results.get("warnings", [])))
+
+    @mock.patch("apps.simulations.dll_full_calculate.run_model_from_json")
+    @mock.patch("apps.simulations.dll_full_calculate._parse_dll_outputs")
+    def test_retries_on_fatal_error_then_succeeds(self, parse_outputs_mock, run_model_mock):
+        run_model_mock.side_effect = [(-1, "auto"), (0, "auto")]
+        parse_outputs_mock.side_effect = [
+            {
+                "equipment": [],
+                "labor": [],
+                "products": [],
+                "operations": [],
+                "warnings": [],
+                "errors": ["0,1,INTERNAL ERROR: fatal"],
+                "overLimitResources": [],
+                "calculatedAt": "now",
+            },
+            {
+                "equipment": [],
+                "labor": [],
+                "products": [],
+                "operations": [],
+                "warnings": [],
+                "errors": [],
+                "overLimitResources": [],
+                "calculatedAt": "now",
+            },
+        ]
+
+        results = run_full_calculate_via_dll(SAMPLE_MODEL)
+        self.assertEqual(run_model_mock.call_count, 2)
+        self.assertFalse(any("retry attempt" in str(w).lower() for w in results.get("warnings", [])))
+
+    @mock.patch("apps.simulations.dll_full_calculate.run_model_from_json")
+    @mock.patch("apps.simulations.dll_full_calculate._parse_dll_outputs")
+    def test_retries_on_results_err_rows_even_when_rc_zero(self, parse_outputs_mock, run_model_mock):
+        run_model_mock.side_effect = [(0, "auto"), (0, "auto")]
+        parse_outputs_mock.side_effect = [
+            {
+                "equipment": [],
+                "labor": [],
+                "products": [],
+                "operations": [],
+                "warnings": [],
+                "errors": ["1,7,Transient DLL warning row"],
+                "overLimitResources": [],
+                "calculatedAt": "now",
+            },
+            {
+                "equipment": [],
+                "labor": [],
+                "products": [],
+                "operations": [],
+                "warnings": [],
+                "errors": [],
+                "overLimitResources": [],
+                "calculatedAt": "now",
+            },
+        ]
+
+        results = run_full_calculate_via_dll(SAMPLE_MODEL)
+        self.assertEqual(run_model_mock.call_count, 2)
+        self.assertEqual(results.get("errors"), [])
+
+    @mock.patch("apps.simulations.dll_full_calculate.run_model_from_json")
+    @mock.patch("apps.simulations.dll_full_calculate._parse_dll_outputs")
+    def test_retries_when_over_limit_resources_are_present(self, parse_outputs_mock, run_model_mock):
+        run_model_mock.side_effect = [(0, "auto"), (0, "auto")]
+        parse_outputs_mock.side_effect = [
+            {
+                "equipment": [],
+                "labor": [],
+                "products": [],
+                "operations": [],
+                "warnings": ['Equipment "Eq A" util (96%) > limit (95%)'],
+                "errors": [],
+                "overLimitResources": ["Equipment: Eq A (96%)"],
+                "calculatedAt": "now",
+            },
+            {
+                "equipment": [],
+                "labor": [],
+                "products": [],
+                "operations": [],
+                "warnings": [],
+                "errors": [],
+                "overLimitResources": [],
+                "calculatedAt": "now",
+            },
+        ]
+
+        results = run_full_calculate_via_dll(SAMPLE_MODEL)
+        self.assertEqual(run_model_mock.call_count, 2)
+        self.assertEqual(results.get("overLimitResources"), [])
+
+    @mock.patch("apps.simulations.dll_full_calculate.run_model_from_json")
+    def test_returns_zero_filled_results_after_all_run_model_exceptions(self, run_model_mock):
+        run_model_mock.side_effect = RuntimeError("boom")
+
+        results = run_full_calculate_via_dll(SAMPLE_MODEL)
+
+        self.assertEqual(run_model_mock.call_count, 6)
+        self.assertIn("equipment", results)
+        self.assertIn("labor", results)
+        self.assertIn("products", results)
+        self.assertIn("operations", results)
+        self.assertTrue(any("boom" in w for w in results.get("warnings", [])))
+
+    @mock.patch("apps.simulations.dll_full_calculate.run_model_from_json")
+    @mock.patch("apps.simulations.dll_full_calculate._parse_dll_outputs")
+    def test_returns_last_parsed_dll_payload_when_all_attempts_retryable(self, parse_outputs_mock, run_model_mock):
+        run_model_mock.return_value = (0, "auto")
+        fatal = "0,1,INTERNAL ERROR: routing stuck"
+        parse_outputs_mock.return_value = {
+            "equipment": [],
+            "labor": [],
+            "products": [],
+            "operations": [],
+            "warnings": [],
+            "errors": [fatal],
+            "overLimitResources": [],
+            "calculatedAt": "now",
+        }
+
+        results = run_full_calculate_via_dll(SAMPLE_MODEL)
+
+        self.assertEqual(run_model_mock.call_count, 6)
+        self.assertEqual(parse_outputs_mock.call_count, 6)
+        self.assertEqual(results.get("errors"), [fatal])
 
     def test_payload_prepends_dummy_labor_and_equipment(self):
         payload = _build_dll_model_payload(SAMPLE_MODEL)

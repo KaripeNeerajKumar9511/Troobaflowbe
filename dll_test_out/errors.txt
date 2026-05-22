@@ -1,0 +1,417 @@
+Starting c++ calculations 
+
+before c1 start11
+ 
+C:\Techsprout.ai projects\Trooba RMCT new\backend\dll_test_out 
+after  c1 start2aa
+ 
+lsize 4 4 
+after  c1 start2b
+ 
+step2 lsize 4 4 
+after  c1 start2c
+ 
+after  c1 start21
+ 
+at start of run it 
+ 
+after c1 start4
+ 
+after c1 start 5
+ 
+after c1 start 5
+ 
+At header results.err 
+1 
+1 
+1 
+2 
+2 
+2 
+3 
+3 
+3 
+4 
+4 
+4 
+5 
+5 
+5 
+6 
+6 
+6 
+7 
+7 
+7 
+8 
+8 
+8 
+9 
+9 
+9 
+10 
+10 
+10 
+11 
+11 
+11 
+12 
+12 
+12 
+13 
+13 
+13 
+14 
+14 
+14 
+15 
+15 
+15 
+16 
+16 
+16 
+17 
+17 
+17 
+18 
+18 
+18 
+19 
+19 
+19 
+20 
+20 
+20 
+21 
+21 
+21 
+22 
+22 
+22 
+23 
+23 
+23 
+24 
+24 
+24 
+25 
+25 
+25 
+26 
+26 
+26 
+27 
+27 
+27 
+28 
+28 
+28 
+29 
+29 
+29 
+30 
+30 
+30 
+31 
+31 
+31 
+32 
+32 
+32 
+33 
+33 
+33 
+34 
+34 
+34 
+35 
+35 
+35 
+36 
+36 
+36 
+37 
+37 
+37 
+38 
+38 
+38 
+39 
+39 
+39 
+40 
+40 
+40 
+41 
+41 
+41 
+42 
+42 
+42 
+43 
+43 
+43 
+44 
+44 
+44 
+45 
+45 
+45 
+46 
+46 
+46 
+47 
+47 
+47 
+48 
+48 
+48 
+49 
+49 
+49 
+50 
+50 
+50 
+51 
+51 
+51 
+52 
+52 
+52 
+53 
+53 
+53 
+54 
+54 
+54 
+55 
+55 
+55 
+56 
+56 
+56 
+57 
+57 
+57 
+58 
+58 
+58 
+59 
+59 
+59 
+60 
+60 
+60 
+after set route ptrs  
+after load data 5
+ 
+at start of run it 
+ 
+after load in run it 
+ 
+start write check 
+  after opers part count  8  
+  after opers part count  8  
+1 
+ 
+* NAME              NAME                  ASSIGNED  
+ 
+2 
+ 
+* NAME              NAME                  ASSIGNED  
+ 
+3 
+ 
+* NAME              NAME                  ASSIGNED  
+ 
+4 
+ 
+* NAME              NAME                  ASSIGNED  
+ 
+5 
+ 
+* NAME              NAME                  ASSIGNED  
+ 
+6 
+ 
+* NAME              NAME                  ASSIGNED  
+ 
+7 
+ 
+* NAME              NAME                  ASSIGNED  
+ 
+8 
+ 
+* NAME              NAME                  ASSIGNED  
+ 
+done parts demand, oper route  
+done writing mpx.mdl 
+after after write  about to mpcalc in run it 
+ 
+at mpcc0 1 
+At prob warn err results.err 
+warning/error!!! 1   WARNING: #(56) -   Transfer Batch Size is greater than lotsize.- Transfer Batch Size should be -1 (meaning it is the same as the lotsize) or less than or equal to Lotsize.     5      
+At prob warn err results.err 
+warning/error!!! 1   WARNING: #(56) -   Transfer Batch Size is greater than lotsize.- Transfer Batch Size should be -1 (meaning it is the same as the lotsize) or less than or equal to Lotsize.     6      
+At prob warn err results.err 
+warning/error!!! 1   WARNING: #(56) -   Transfer Batch Size is greater than lotsize.- Transfer Batch Size should be -1 (meaning it is the same as the lotsize) or less than or equal to Lotsize.     7      
+At prob warn err results.err 
+warning/error!!! 1   WARNING: #(56) -   Transfer Batch Size is greater than lotsize.- Transfer Batch Size should be -1 (meaning it is the same as the lotsize) or less than or equal to Lotsize.     8      
+at start do_visits 
+check_rout ?  do_visits-1 prod 
+begin do visit a part 
+after check_ops 
+at start do_visits A 
+ERROR: #(74) 
+ For part 1 % of pieces Routed out of DOCK does not equal  100.0%  
+At prob warn err results.err 
+warning/error!!! 0   ERROR: #(74) - % of pieces Routed out of DOCK does not equal 100.0%    (null) (null) 1   1 (null) (null) 
+after count_op  
+after count_op   toplst returned == null ? 
+after count_op A  0  
+  cancel calc after count_op A 
+afte 1 do visits 
+after 1 do visits 
+in do_visits 
+check_rout ?  do_visits-1 prod 
+begin do visit a part 
+after check_ops 
+at start do_visits A 
+ERROR: #(74) 
+ For part 2 % of pieces Routed out of DOCK does not equal  100.0%  
+At prob warn err results.err 
+warning/error!!! 0   ERROR: #(74) - % of pieces Routed out of DOCK does not equal 100.0%    (null) (null) 2   6 (null) (null) 
+after count_op  
+after count_op   toplst returned == null ? 
+after count_op A  0  
+  cancel calc after count_op A 
+afte 1 do visits 
+after 1 do visits 
+in do_visits 
+check_rout ?  do_visits-1 prod 
+begin do visit a part 
+after check_ops 
+at start do_visits A 
+ERROR: #(74) 
+ For part 3 % of pieces Routed out of DOCK does not equal  100.0%  
+At prob warn err results.err 
+warning/error!!! 0   ERROR: #(74) - % of pieces Routed out of DOCK does not equal 100.0%    (null) (null) 3   11 (null) (null) 
+after count_op  
+after count_op   toplst returned == null ? 
+after count_op A  0  
+  cancel calc after count_op A 
+afte 1 do visits 
+after 1 do visits 
+in do_visits 
+check_rout ?  do_visits-1 prod 
+begin do visit a part 
+after check_ops 
+at start do_visits A 
+ERROR: #(74) 
+ For part 4 % of pieces Routed out of DOCK does not equal  100.0%  
+At prob warn err results.err 
+warning/error!!! 0   ERROR: #(74) - % of pieces Routed out of DOCK does not equal 100.0%    (null) (null) 4   21 (null) (null) 
+after count_op  
+after count_op   toplst returned == null ? 
+after count_op A  0  
+  cancel calc after count_op A 
+afte 1 do visits 
+after 1 do visits 
+in do_visits 
+check_rout ?  do_visits-1 prod 
+begin do visit a part 
+At prob warn err results.err 
+warning/error!!! 1   WARNING: #(83)- Equipment Time  setup 0.000000 run -0.031250 is less than Labor Time setup 0.000000 run 0.000000 for an operation. Be sure you want more than 1 person assigned to the operation.    2 7 5   5-35     
+e checking where lpiece  5 1-5 0.000000 
+ 
+checking where lpiece 8 2-9 32768.008011 
+ 
+after check_ops 
+at start do_visits A 
+ERROR: #(74) 
+ For part 5 % of pieces Routed out of DOCK does not equal  100.0%  
+At prob warn err results.err 
+warning/error!!! 0   ERROR: #(74) - % of pieces Routed out of DOCK does not equal 100.0%    (null) (null) 5   31 (null) (null) 
+after count_op  
+after count_op   toplst returned == null ? 
+after count_op A  0  
+  cancel calc after count_op A 
+afte 1 do visits 
+after 1 do visits 
+in do_visits 
+check_rout ?  do_visits-1 prod 
+begin do visit a part 
+At prob warn err results.err 
+warning/error!!! 1   WARNING: #(80)-  Equipment Time=0.0 and Labor Time>0.0 for an operation  - Please check operation time data    2 7 6   6-45     
+At prob warn err results.err 
+warning/error!!! 1   WARNING: #(80)-  Equipment Time=0.0 and Labor Time>0.0 for an operation  - Please check operation time data    2 3 6   6-50     
+At prob warn err results.err 
+warning/error!!! 1   WARNING: #(83)- Equipment Time  setup 0.000000 run -17178841147.502268 is less than Labor Time setup 0.000000 run 1024.000735 for an operation. Be sure you want more than 1 person assigned to the operation.    2 7 6   6-45     
+e checking where lpiece  5 1-5 0.000000 
+ 
+checking where lpiece 8 2-9 32768.008011 
+ 
+At prob warn err results.err 
+warning/error!!! 1   WARNING: #(83)- Equipment Time  setup 0.000000 run -67104848.318375 is less than Labor Time setup 0.000000 run 2.000001 for an operation. Be sure you want more than 1 person assigned to the operation.    2 3 6   6-50     
+e checking where lpiece  5 1-5 0.000000 
+ 
+checking where lpiece 8 2-9 32768.008011 
+ 
+after check_ops 
+at start do_visits A 
+ERROR: #(74) 
+ For part 6 % of pieces Routed out of DOCK does not equal  100.0%  
+At prob warn err results.err 
+warning/error!!! 0   ERROR: #(74) - % of pieces Routed out of DOCK does not equal 100.0%    (null) (null) 6   41 (null) (null) 
+after count_op  
+after count_op   toplst returned == null ? 
+after count_op A  0  
+  cancel calc after count_op A 
+afte 1 do visits 
+after 1 do visits 
+in do_visits 
+check_rout ?  do_visits-1 prod 
+begin do visit a part 
+At prob warn err results.err 
+warning/error!!! 1   WARNING: #(83)- Equipment Time  setup 0.000000 run -1.984377 is less than Labor Time setup 0.000000 run 0.000000 for an operation. Be sure you want more than 1 person assigned to the operation.    3 1 7   7-54     
+e checking where lpiece  5 1-5 0.000000 
+ 
+checking where lpiece 8 2-9 32768.008011 
+ 
+after check_ops 
+at start do_visits A 
+ERROR: #(74) 
+ For part 7 % of pieces Routed out of DOCK does not equal  100.0%  
+At prob warn err results.err 
+warning/error!!! 0   ERROR: #(74) - % of pieces Routed out of DOCK does not equal 100.0%    (null) (null) 7   51 (null) (null) 
+after count_op  
+after count_op   toplst returned == null ? 
+after count_op A  0  
+  cancel calc after count_op A 
+afte 1 do visits 
+after 1 do visits 
+in do_visits 
+check_rout ?  do_visits-1 prod 
+begin do visit a part 
+after check_ops 
+at start do_visits A 
+ERROR: #(74) 
+ For part 8 % of pieces Routed out of DOCK does not equal  100.0%  
+At prob warn err results.err 
+warning/error!!! 0   ERROR: #(74) - % of pieces Routed out of DOCK does not equal 100.0%    (null) (null) 8   56 (null) (null) 
+after count_op  
+after count_op   toplst returned == null ? 
+after count_op A  0  
+  cancel calc after count_op A 
+afte 1 do visits 
+after 1 do visits 
+in do_visits 
+error in doall visits 
+error before ...set demand start 
+internal error/data error ... NO write_results in run it 
+ 
+in to clear c1 
+in to clear c1 before oper 1 
+in to clear c1  after route  
+in to clear c1  after extras   
+out of clear c1 

@@ -1840,6 +1840,8 @@ def verify_model_data(model: dict) -> Dict[str, List[str]]:
     products = model.get("products") or []
     operations = model.get("operations") or []
     routing = model.get("routing") or []
+    general = model.get("general") or {}
+    ops_unit = str(general.get("ops_time_unit") or "ops time unit")
 
     if len(labor) == 0:
         warnings.append("No labor groups defined.")
@@ -1850,25 +1852,117 @@ def verify_model_data(model: dict) -> Dict[str, List[str]]:
     if len(operations) == 0:
         errors.append("No operations defined for any product.")
 
+    conv1 = general.get("conv1")
+    conv2 = general.get("conv2")
+    try:
+        c1 = float(conv1) if conv1 is not None else 0.0
+    except (TypeError, ValueError):
+        c1 = 0.0
+    try:
+        c2 = float(conv2) if conv2 is not None else 0.0
+    except (TypeError, ValueError):
+        c2 = 0.0
+    if c1 <= 0:
+        errors.append(
+            "MCT Conversion (operations per MCT time unit) must be greater than 0 — General Data → Time Settings."
+        )
+    if c2 <= 0:
+        errors.append(
+            "Production Period Conversion (MCT units per production period) must be greater than 0 — General Data → Time Settings."
+        )
+
     labor_ids = {str(x.get("id", "")) for x in labor}
     equip_ids = {str(x.get("id", "")) for x in equipment}
 
     for eq in equipment:
+        name = str(eq.get("name", "") or "")
         lid = str(eq.get("labor_group_id") or "")
         if lid and lid not in labor_ids:
-            errors.append(f'Equipment "{eq.get("name", "")}" references non-existent labor group.')
+            errors.append(
+                f'Equipment "{name}" references a labor group that does not exist — assign a valid group on Equipment Data.'
+            )
+        try:
+            mttf = float(eq.get("mttf", 0) or 0)
+        except (TypeError, ValueError):
+            mttf = 0.0
+        if mttf < 1:
+            errors.append(
+                f'Equipment "{name}": MTTF must be ≥ 1 ({ops_unit}). Use Equipment Data to set mean time to failure.'
+            )
 
     for op in operations:
         eid = str(op.get("equip_id") or "")
+        opname = str(op.get("op_name", "") or "")
         if eid and eid not in equip_ids:
-            errors.append(f'Operation "{op.get("op_name", "")}" references non-existent equipment.')
+            errors.append(
+                f'Operation "{opname}" references equipment that does not exist — fix equipment assignment on Operations Data.'
+            )
 
     prod_by_id = {str(p.get("id")): p for p in products}
     for p in products:
         pid = str(p.get("id", ""))
-        if float(p.get("demand", 0) or 0) > 0:
-            if not any(str(o.get("product_id")) == pid for o in operations):
-                warnings.append(f'Product "{p.get("name", "")}" has demand but no operations.')
+        pname = str(p.get("name", "") or "")
+        prod_ops = [o for o in operations if str(o.get("product_id")) == pid]
+        if len(prod_ops) == 0:
+            errors.append(f'Product "{pname}": add at least one operation (Operations Data).')
+        routes = [r for r in routing if str(r.get("product_id")) == pid]
+        if len(routes) == 0:
+            errors.append(
+                f'Product "{pname}": add at least one routing row with From and To operations (Routing Data).'
+            )
+        else:
+            bad = False
+            from_names = set()
+            to_names = set()
+            for r in routes:
+                frm = str(r.get("from_op_name") or "").strip()
+                to = str(r.get("to_op_name") or "").strip()
+                if not frm or not to:
+                    bad = True
+                    break
+                from_names.add(frm)
+                to_names.add(to)
+            if bad:
+                errors.append(
+                    f'Product "{pname}": every routing row needs both From operation and To operation filled in (Routing Data).'
+                )
+            elif len(from_names) < 1 or len(to_names) < 1:
+                errors.append(
+                    f'Product "{pname}": routing must include at least one From step and one To step (Routing Data).'
+                )
+        try:
+            ls = float(p.get("lot_size", 1) or 0)
+        except (TypeError, ValueError):
+            ls = 0.0
+        try:
+            dem = float(p.get("demand", 0) or 0)
+        except (TypeError, ValueError):
+            dem = -1.0
+        if ls < 1:
+            errors.append(f'Product "{pname}": Lot Size must be ≥ 1 — Product Data.')
+        if dem < 0:
+            errors.append(f'Product "{pname}": Demand cannot be negative — Product Data.')
+
+    for e in equipment:
+        et = str(e.get("equip_type") or "")
+        name = str(e.get("name", "") or "")
+        try:
+            cnt = float(e.get("count", 0) or 0)
+        except (TypeError, ValueError):
+            cnt = 0.0
+        if et == "standard" and cnt < 1:
+            errors.append(
+                f'Equipment "{name}": Count must be ≥ 1 for standard equipment — Equipment Data.'
+            )
+
+    for lb in labor:
+        lname = str(lb.get("name", "") or "")
+        try:
+            lc = float(lb.get("count", 0) or 0)
+        except (TypeError, ValueError):
+            lc = 0.0
+        if lc < 1:
+            errors.append(f'Labor "{lname}": Count must be ≥ 1 — Labor Data.')
 
     from_ops_set = set()
     for r in routing:

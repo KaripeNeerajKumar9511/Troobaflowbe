@@ -1,0 +1,19 @@
+Level,Table,Text,mpxFlag,laborid,equipid,partid,operID,routeId,ibomID
+1,In Calculations,WARNING: #(56) -   Transfer Batch Size is greater than lotsize.- Transfer Batch Size should be -1 (meaning it is the same as the lotsize) or less than or equal to Lotsize., 1 ,,,5,,,
+1,In Calculations,WARNING: #(56) -   Transfer Batch Size is greater than lotsize.- Transfer Batch Size should be -1 (meaning it is the same as the lotsize) or less than or equal to Lotsize., 1 ,,,6,,,
+1,In Calculations,WARNING: #(56) -   Transfer Batch Size is greater than lotsize.- Transfer Batch Size should be -1 (meaning it is the same as the lotsize) or less than or equal to Lotsize., 1 ,,,7,,,
+1,In Calculations,WARNING: #(56) -   Transfer Batch Size is greater than lotsize.- Transfer Batch Size should be -1 (meaning it is the same as the lotsize) or less than or equal to Lotsize., 1 ,,,8,,,
+0,In Calculations,ERROR: #(74) - % of pieces Routed out of DOCK does not equal 100.0% , 1 ,(null),(null),1,1,(null),(null)
+0,In Calculations,ERROR: #(74) - % of pieces Routed out of DOCK does not equal 100.0% , 1 ,(null),(null),2,6,(null),(null)
+0,In Calculations,ERROR: #(74) - % of pieces Routed out of DOCK does not equal 100.0% , 1 ,(null),(null),3,11,(null),(null)
+0,In Calculations,ERROR: #(74) - % of pieces Routed out of DOCK does not equal 100.0% , 1 ,(null),(null),4,21,(null),(null)
+1,In Calculations,WARNING: #(83)- Equipment Time  setup 0.000000 run -0.031250 is less than Labor Time setup 0.000000 run 0.000000 for an operation. Be sure you want more than 1 person assigned to the operation. , 1 ,2,7,5,5-35, , 
+0,In Calculations,ERROR: #(74) - % of pieces Routed out of DOCK does not equal 100.0% , 1 ,(null),(null),5,31,(null),(null)
+1,In Calculations,WARNING: #(80)-  Equipment Time=0.0 and Labor Time>0.0 for an operation  - Please check operation time data , 1 ,2,7,6,6-45, , 
+1,In Calculations,WARNING: #(80)-  Equipment Time=0.0 and Labor Time>0.0 for an operation  - Please check operation time data , 1 ,2,3,6,6-50, , 
+1,In Calculations,WARNING: #(83)- Equipment Time  setup 0.000000 run -17178841147.502268 is less than Labor Time setup 0.000000 run 1024.000735 for an operation. Be sure you want more than 1 person assigned to the operation. , 1 ,2,7,6,6-45, , 
+1,In Calculations,WARNING: #(83)- Equipment Time  setup 0.000000 run -67104848.318375 is less than Labor Time setup 0.000000 run 2.000001 for an operation. Be sure you want more than 1 person assigned to the operation. , 1 ,2,3,6,6-50, , 
+0,In Calculations,ERROR: #(74) - % of pieces Routed out of DOCK does not equal 100.0% , 1 ,(null),(null),6,41,(null),(null)
+1,In Calculations,WARNING: #(83)- Equipment Time  setup 0.000000 run -1.984377 is less than Labor Time setup 0.000000 run 0.000000 for an operation. Be sure you want more than 1 person assigned to the operation. , 1 ,3,1,7,7-54, , 
+0,In Calculations,ERROR: #(74) - % of pieces Routed out of DOCK does not equal 100.0% , 1 ,(null),(null),7,51,(null),(null)
+0,In Calculations,ERROR: #(74) - % of pieces Routed out of DOCK does not equal 100.0% , 1 ,(null),(null),8,56,(null),(null)

@@ -165,6 +165,10 @@ def model_routing_set(request, model_id):
     except Product.DoesNotExist as exc:
         return JsonResponse({"error": str(exc)}, status=400)
 
+    # Soft-delete current live routes for this product. New rows cannot use
+    # Routing.objects.create() for the same (product, from, to) because
+    # unique_operation_path applies to soft-deleted rows too — reuse/undelete
+    # like model_routing_create (see migrations constraint on routing table).
     Routing.objects.filter(
         product=product,
         organization=org,
@@ -188,13 +192,29 @@ def model_routing_set(request, model_id):
                 {"error": "pct_routed must be 0-100"}, status=400
             )
 
-        Routing.objects.create(
-            organization=org,
-            product=product,
-            from_operation=from_op,
-            to_operation=to_op,
-            probability=pct_routed,
+        routing = (
+            Routing.objects.filter(
+                product=product,
+                from_operation=from_op,
+                to_operation=to_op,
+            )
+            .order_by("-deleted_at")
+            .first()
         )
+
+        if routing:
+            routing.probability = pct_routed
+            routing.deleted_at = None
+            routing.organization = org
+            routing.save()
+        else:
+            Routing.objects.create(
+                organization=org,
+                product=product,
+                from_operation=from_op,
+                to_operation=to_op,
+                probability=pct_routed,
+            )
 
     return JsonResponse({})
 

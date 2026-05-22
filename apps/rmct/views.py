@@ -4,6 +4,8 @@ Matches frontend contract in docs/BACKEND_API.md. No Supabase; all data in Djang
 """
 import json
 import uuid
+from django.db import transaction
+from django.db.models import Case, IntegerField, Value, When
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
@@ -19,6 +21,9 @@ from apps.routing.models import Routing
 from apps.ibom.models import BOM
 
 from .models import RMCMModel, ModelVersion, Scenario, ScenarioChange, ScenarioResult
+from .snapshot_restore import SnapshotScopeError, apply_snapshot_to_model
+
+PRE_RESTORE_LABEL = "Previous state (auto-saved)"
 
 
 def _parse_json(request):
@@ -26,6 +31,28 @@ def _parse_json(request):
         return json.loads(request.body) if request.body else {}
     except json.JSONDecodeError:
         return None
+
+
+def _require_authenticated(request):
+    if not request.user.is_authenticated:
+        return JsonResponse({'error': 'Unauthorized'}, status=401)
+    return None
+
+
+def _owned_models_qs(request):
+    return RMCMModel.objects.filter(owner=request.user)
+
+
+def _owned_model_or_404(request, model_id):
+    return get_object_or_404(_owned_models_qs(request), id=model_id)
+
+
+def _owned_scenario_or_404(request, scenario_id):
+    return get_object_or_404(Scenario.objects.filter(model__owner=request.user), id=scenario_id)
+
+
+def _owned_version_or_404(request, version_id):
+    return get_object_or_404(ModelVersion.objects.filter(model__owner=request.user), id=version_id)
 
 
 def _serialize_general(m: RMCMModel) -> dict:
@@ -206,10 +233,6 @@ def _products_for_model(m: RMCMModel):
 def _operations_for_model(m: RMCMModel):
     """
     Build Operation[] payload for a model from the dedicated operations table.
-
-    The relational Operation model is a simplified representation. Fields that
-    do not exist on the model are surfaced as zeros to keep the frontend type
-    happy.
     """
     ops_qs = Operation.objects.filter(
         product__model=m,
@@ -226,21 +249,21 @@ def _operations_for_model(m: RMCMModel):
             'equip_id': str(op.equipment_group_id) if op.equipment_group_id else '',
             'pct_assigned': op.percent_assign,
             'equip_setup_lot': op.equipment_setup_per_lot,
-            'equip_setup_piece': 0,
-            'equip_setup_tbatch': 0,
+            'equip_setup_piece': op.equipment_setup_per_piece,
+            'equip_setup_tbatch': op.equipment_setup_per_tbatch,
             'equip_run_piece': op.equipment_run_per_piece,
-            'equip_run_lot': 0,
-            'equip_run_tbatch': 0,
+            'equip_run_lot': op.equipment_run_per_lot,
+            'equip_run_tbatch': op.equipment_run_per_tbatch,
             'labor_setup_lot': op.labor_setup_per_lot,
-            'labor_setup_piece': 0,
-            'labor_setup_tbatch': 0,
+            'labor_setup_piece': op.labor_setup_per_piece,
+            'labor_setup_tbatch': op.labor_setup_per_tbatch,
             'labor_run_piece': op.labor_run_per_piece,
-            'labor_run_lot': 0,
-            'labor_run_tbatch': 0,
-            'oper1': 0,
-            'oper2': 0,
-            'oper3': 0,
-            'oper4': 0,
+            'labor_run_lot': op.labor_run_per_lot,
+            'labor_run_tbatch': op.labor_run_per_tbatch,
+            'oper1': op.oper1,
+            'oper2': op.oper2,
+            'oper3': op.oper3,
+            'oper4': op.oper4,
         })
     return payload
 
@@ -286,6 +309,21 @@ def _ibom_for_model(m: RMCMModel):
     return payload
 
 
+def _build_snapshot_from_model(m: RMCMModel) -> dict:
+    """Server-side snapshot for checkpoints (authoritative DB state)."""
+    return {
+        "general": _serialize_general(m),
+        "labor": _labor_for_model(m),
+        "equipment": _equipment_for_model(m),
+        "products": _products_for_model(m),
+        "operations": _operations_for_model(m),
+        "routing": _routing_for_model(m),
+        "ibom": _ibom_for_model(m),
+        "param_names": m.param_names if isinstance(getattr(m, "param_names", None), dict) else {},
+        "dept_codes": m.dept_codes if isinstance(getattr(m, "dept_codes", None), dict) else {},
+    }
+
+
 def _model_to_payload(m: RMCMModel) -> dict:
     """Serialize RMCMModel to frontend Model shape."""
     last_run_value = m.last_run_at
@@ -322,12 +360,14 @@ def _model_to_payload(m: RMCMModel) -> dict:
 
 # ─── Models ─────────────────────────────────────────────────────────────
 
+@csrf_exempt
 def model_list_or_create(request):
     """GET /api/models — list all. POST /api/models — create (body has full model with id)."""
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
     if request.method == 'GET':
-        qs = RMCMModel.objects.all()
-        if request.user.is_authenticated:
-            qs = qs.filter(owner=request.user)
+        qs = _owned_models_qs(request)
         payload = [_model_to_payload(m) for m in qs]
         return JsonResponse(payload, safe=False)
     if request.method == 'POST':
@@ -338,9 +378,10 @@ def model_list_or_create(request):
 @require_http_methods(['GET'])
 def model_list(request):
     """GET /api/models — list all models."""
-    qs = RMCMModel.objects.all()
-    if request.user.is_authenticated:
-        qs = qs.filter(owner=request.user)
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
+    qs = _owned_models_qs(request)
     payload = [_model_to_payload(m) for m in qs]
     return JsonResponse(payload, safe=False)
 
@@ -348,7 +389,10 @@ def model_list(request):
 @require_http_methods(['GET'])
 def model_detail(request, model_id):
     """GET /api/models/:id — get one model."""
-    m = RMCMModel.objects.filter(id=model_id).first()
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
+    m = _owned_models_qs(request).filter(id=model_id).first()
     if not m:
         return JsonResponse(None, safe=False)
     return JsonResponse(_model_to_payload(m))
@@ -360,6 +404,9 @@ def model_save(request, model_id=None):
     """
     POST /api/models — create (body includes id) or PUT /api/models/:id — update full model.
     """
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
     data = _parse_json(request)
     if data is None:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
@@ -386,9 +433,18 @@ def model_save(request, model_id=None):
         defaults['param_names'] = data['param_names']
     if isinstance(data.get('dept_codes'), dict):
         defaults['dept_codes'] = data['dept_codes']
-    if request.user.is_authenticated:
-        defaults['owner'] = request.user
-    obj, created = RMCMModel.objects.update_or_create(id=uid, defaults=defaults)
+    existing = RMCMModel.objects.filter(id=uid).first()
+    if existing and existing.owner_id != request.user.id:
+        return JsonResponse({'error': 'Model not found'}, status=404)
+    defaults['owner'] = request.user
+    if existing:
+        for key, value in defaults.items():
+            setattr(existing, key, value)
+        existing.save()
+        obj, created = existing, False
+    else:
+        obj = RMCMModel.objects.create(id=uid, **defaults)
+        created = True
     return JsonResponse(_model_to_payload(obj), status=201 if created else 200)
 
 
@@ -396,7 +452,10 @@ def model_save(request, model_id=None):
 @require_http_methods(['PATCH'])
 def model_patch(request, model_id):
     """PATCH /api/models/:id — partial update (metadata or nested)."""
-    m = get_object_or_404(RMCMModel, id=model_id)
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
+    m = _owned_model_or_404(request, model_id)
     data = _parse_json(request)
     if data is None:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
@@ -416,7 +475,10 @@ def model_patch(request, model_id):
 @require_http_methods(['DELETE'])
 def model_delete(request, model_id):
     """DELETE /api/models/:id."""
-    m = RMCMModel.objects.filter(id=model_id).first()
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
+    m = _owned_models_qs(request).filter(id=model_id).first()
     if m:
         m.delete()
     return JsonResponse({}, status=204)
@@ -427,7 +489,10 @@ def model_delete(request, model_id):
 @require_http_methods(['GET'])
 def model_param_names(request, model_id):
     """GET /api/models/:id/param-names."""
-    m = get_object_or_404(RMCMModel, id=model_id)
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
+    m = _owned_model_or_404(request, model_id)
     return JsonResponse(m.param_names if isinstance(m.param_names, dict) else {})
 
 
@@ -435,7 +500,10 @@ def model_param_names(request, model_id):
 @require_http_methods(['PUT'])
 def model_param_names_upsert(request, model_id):
     """PUT /api/models/:id/param-names — merge param names."""
-    m = get_object_or_404(RMCMModel, id=model_id)
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
+    m = _owned_model_or_404(request, model_id)
     data = _parse_json(request)
     if data is None:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
@@ -448,7 +516,10 @@ def model_param_names_upsert(request, model_id):
 
 @require_http_methods(['GET'])
 def model_dept_codes(request, model_id):
-    m = get_object_or_404(RMCMModel, id=model_id)
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
+    m = _owned_model_or_404(request, model_id)
     dc = m.dept_codes if isinstance(m.dept_codes, dict) else {}
     return JsonResponse(dc)
 
@@ -456,7 +527,10 @@ def model_dept_codes(request, model_id):
 @csrf_exempt
 @require_http_methods(['PUT'])
 def model_dept_codes_put(request, model_id):
-    m = get_object_or_404(RMCMModel, id=model_id)
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
+    m = _owned_model_or_404(request, model_id)
     data = _parse_json(request)
     if data is None:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
@@ -471,7 +545,10 @@ def model_dept_codes_put(request, model_id):
 @require_http_methods(['PATCH'])
 def model_general(request, model_id):
     """PATCH /api/models/:id/general."""
-    m = get_object_or_404(RMCMModel, id=model_id)
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
+    m = _owned_model_or_404(request, model_id)
     data = _parse_json(request)
     if data is None:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
@@ -484,7 +561,10 @@ def model_general(request, model_id):
 @csrf_exempt
 @require_http_methods(['POST'])
 def model_labor_create(request, model_id):
-    m = get_object_or_404(RMCMModel, id=model_id)
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
+    m = _owned_model_or_404(request, model_id)
     data = _parse_json(request)
     if data is None:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
@@ -533,12 +613,15 @@ def model_labor_create(request, model_id):
 @csrf_exempt
 @require_http_methods(['PATCH'])
 def model_labor_update(request, model_id, labor_id):
-    m = get_object_or_404(RMCMModel, id=model_id)
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
+    m = _owned_model_or_404(request, model_id)
     data = _parse_json(request)
     if data is None:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
 
-    labor = get_object_or_404(Labor, id=labor_id)
+    labor = get_object_or_404(Labor.objects.filter(model=m), id=labor_id)
 
     # Map incoming payload fields onto Labor model.
     if 'name' in data:
@@ -573,11 +656,14 @@ def model_labor_update(request, model_id, labor_id):
 @csrf_exempt
 @require_http_methods(['DELETE'])
 def model_labor_delete(request, model_id, labor_id):
-    m = get_object_or_404(RMCMModel, id=model_id)
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
+    m = _owned_model_or_404(request, model_id)
     # Soft-delete the Labor row if it exists; keep behaviour consistent with
     # apps.labor.views.delete_labor.
     try:
-        labor = Labor.objects.get(id=labor_id)
+        labor = Labor.objects.get(id=labor_id, model=m)
     except Labor.DoesNotExist:
         return JsonResponse({}, status=204)
 
@@ -603,36 +689,75 @@ def model_labor_delete(request, model_id, labor_id):
 @require_http_methods(['GET'])
 def version_list(request, model_id):
     """GET /api/models/:modelId/versions."""
-    qs = ModelVersion.objects.filter(model_id=model_id).order_by('-created_at')
-    payload = [{'id': str(v.id), 'label': v.label, 'created_at': v.created_at.isoformat()} for v in qs]
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
+    m = _owned_model_or_404(request, model_id)
+    qs = (
+        ModelVersion.objects.filter(model=m)
+        .annotate(
+            _prio=Case(
+                When(version_kind=ModelVersion.KIND_PRE_RESTORE, then=Value(0)),
+                default=Value(1),
+                output_field=IntegerField(),
+            )
+        )
+        .order_by("_prio", "-created_at")
+    )
+    payload = [
+        {
+            "id": str(v.id),
+            "label": v.label,
+            "created_at": v.created_at.isoformat(),
+            "version_kind": v.version_kind,
+        }
+        for v in qs
+    ]
     return JsonResponse(payload, safe=False)
 
 
 @require_http_methods(['POST'])
 def version_create(request, model_id):
     """POST /api/models/:modelId/versions — body: { label, snapshot }."""
-    get_object_or_404(RMCMModel, id=model_id)
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
+    m = _owned_model_or_404(request, model_id)
     data = _parse_json(request)
     if data is None:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
     label = data.get('label', '')
     snapshot = data.get('snapshot', {})
+    if not isinstance(snapshot, dict) or not snapshot:
+        snapshot = _build_snapshot_from_model(m)
     vid = uuid.uuid4()
-    ModelVersion.objects.create(id=vid, model_id=model_id, label=label, snapshot=snapshot)
+    ModelVersion.objects.create(
+        id=vid,
+        model=m,
+        label=label,
+        snapshot=snapshot,
+        version_kind=ModelVersion.KIND_MANUAL,
+    )
     return JsonResponse({'id': str(vid)}, status=201)
 
 
 @require_http_methods(['GET'])
 def version_snapshot(request, version_id):
     """GET /api/versions/:versionId — snapshot + created_at."""
-    v = get_object_or_404(ModelVersion, id=version_id)
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
+    v = _owned_version_or_404(request, version_id)
     return JsonResponse({'snapshot': v.snapshot, 'created_at': v.created_at.isoformat()})
 
 
 @require_http_methods(['PATCH'])
 def version_patch(request, version_id):
     """PATCH /api/versions/:versionId — update label."""
-    v = get_object_or_404(ModelVersion, id=version_id)
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
+    v = _owned_version_or_404(request, version_id)
     data = _parse_json(request)
     if data is None:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
@@ -644,32 +769,65 @@ def version_patch(request, version_id):
 
 @require_http_methods(['DELETE'])
 def version_delete(request, version_id):
-    v = ModelVersion.objects.filter(id=version_id).first()
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
+    v = ModelVersion.objects.filter(id=version_id, model__owner=request.user).first()
     if v:
         v.delete()
     return JsonResponse({}, status=204)
 
 
 @require_http_methods(['POST'])
+@transaction.atomic
 def version_restore(request, model_id, version_id):
     """POST /api/models/:modelId/versions/:versionId/restore — apply snapshot to model, return Model."""
-    m = get_object_or_404(RMCMModel, id=model_id)
-    v = ModelVersion.objects.filter(id=version_id, model_id=model_id).first()
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
+    m = _owned_model_or_404(request, model_id)
+    v = ModelVersion.objects.filter(id=version_id, model=m).first()
     if not v:
         return JsonResponse({'error': 'Version not found'}, status=404)
     snap = v.snapshot or {}
-    m.general = snap.get('general', m.general)
-    m.labor = snap.get('labor', m.labor)
-    m.equipment = snap.get('equipment', m.equipment)
-    m.products = snap.get('products', m.products)
-    m.operations = snap.get('operations', m.operations)
-    m.routing = snap.get('routing', m.routing)
-    m.ibom = snap.get('ibom', m.ibom)
-    if snap.get('param_names'):
-        m.param_names = snap['param_names']
-    m.run_status = 'needs_recalc'
-    m.save()
-    return JsonResponse(_model_to_payload(m))
+    consumed_undo = v.version_kind == ModelVersion.KIND_PRE_RESTORE
+
+    rollback_id = None
+    if not consumed_undo:
+        # One rollback slot per model: current DB state before applying a manual checkpoint.
+        ModelVersion.objects.filter(model=m, version_kind=ModelVersion.KIND_PRE_RESTORE).delete()
+        rollback_id = uuid.uuid4()
+        rollback_snapshot = _build_snapshot_from_model(m)
+        ModelVersion.objects.create(
+            id=rollback_id,
+            model=m,
+            label=PRE_RESTORE_LABEL,
+            snapshot=rollback_snapshot,
+            version_kind=ModelVersion.KIND_PRE_RESTORE,
+        )
+
+    try:
+        apply_snapshot_to_model(m, snap)
+    except SnapshotScopeError as e:
+        return JsonResponse({'error': str(e)}, status=403)
+    except ValueError as e:
+        return JsonResponse({'error': str(e)}, status=400)
+
+    if consumed_undo:
+        # Undo checkpoint is single-use: remove it so it cannot be restored again until
+        # the user restores another manual checkpoint (which recreates the slot).
+        ModelVersion.objects.filter(id=version_id, model=m).delete()
+
+    payload = _model_to_payload(m)
+    payload["restore_meta"] = {
+        "restored_from_label": v.label,
+    }
+    if rollback_id is not None:
+        payload["restore_meta"]["rollback_version_id"] = str(rollback_id)
+        payload["restore_meta"]["rollback_label"] = PRE_RESTORE_LABEL
+    if consumed_undo:
+        payload["restore_meta"]["consumed_undo"] = True
+    return JsonResponse(payload)
 
 
 # ─── Scenarios ───────────────────────────────────────────────────────────
@@ -698,7 +856,10 @@ def scenario_list_or_create(request, model_id):
 @require_http_methods(['GET'])
 def scenario_list(request, model_id):
     """GET /api/models/:modelId/scenarios — scenarios + changes + results."""
-    m = get_object_or_404(RMCMModel, id=model_id)
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
+    m = _owned_model_or_404(request, model_id)
     scenarios_qs = Scenario.objects.filter(model=m, is_basecase=False).order_by('-updated_at')
     scenario_ids = [s.id for s in scenarios_qs]
     changes_qs = ScenarioChange.objects.filter(scenario_id__in=scenario_ids)
@@ -730,10 +891,15 @@ def scenario_list(request, model_id):
     return JsonResponse({'scenarios': scenarios_payload, 'results': results_map})
 
 
+@csrf_exempt
 def scenario_basecase_results(request, model_id):
     """GET /api/models/:modelId/scenarios/basecase/results — return results. PUT — save results."""
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
+    m = _owned_model_or_404(request, model_id)
     if request.method == 'GET':
-        base = Scenario.objects.filter(model_id=model_id, is_basecase=True).first()
+        base = Scenario.objects.filter(model=m, is_basecase=True).first()
         if not base:
             return JsonResponse(None, safe=False)
         try:
@@ -749,33 +915,42 @@ def scenario_basecase_results(request, model_id):
 @require_http_methods(['POST'])
 def scenario_ensure_basecase(request, model_id):
     """POST /api/models/:modelId/scenarios/basecase — idempotent, return { id }."""
-    get_object_or_404(RMCMModel, id=model_id)
-    base = Scenario.objects.filter(model_id=model_id, is_basecase=True).first()
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
+    m = _owned_model_or_404(request, model_id)
+    base = Scenario.objects.filter(model=m, is_basecase=True).first()
     if base:
         return JsonResponse({'id': str(base.id)})
     sid = uuid.uuid4()
-    Scenario.objects.create(id=sid, model_id=model_id, name='Basecase', description='', is_basecase=True, status='needs_recalc')
+    Scenario.objects.create(id=sid, model=m, name='Basecase', description='', is_basecase=True, status='needs_recalc')
     return JsonResponse({'id': str(sid)}, status=201)
 
 
 @require_http_methods(['POST'])
 def scenario_create(request, model_id):
     """POST /api/models/:modelId/scenarios — body: { name, description }."""
-    get_object_or_404(RMCMModel, id=model_id)
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
+    m = _owned_model_or_404(request, model_id)
     data = _parse_json(request)
     if data is None:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
     name = data.get('name', '')
     description = data.get('description', '')
     sid = uuid.uuid4()
-    Scenario.objects.create(id=sid, model_id=model_id, name=name, description=description, is_basecase=False, status='needs_recalc')
+    Scenario.objects.create(id=sid, model=m, name=name, description=description, is_basecase=False, status='needs_recalc')
     return JsonResponse({'id': str(sid)}, status=201)
 
 
 @require_http_methods(['PATCH'])
 def scenario_patch(request, scenario_id):
     """PATCH /api/scenarios/:id — name, description, status."""
-    s = get_object_or_404(Scenario, id=scenario_id)
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
+    s = _owned_scenario_or_404(request, scenario_id)
     data = _parse_json(request)
     if data is None:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
@@ -788,7 +963,10 @@ def scenario_patch(request, scenario_id):
 
 @require_http_methods(['DELETE'])
 def scenario_delete(request, scenario_id):
-    s = Scenario.objects.filter(id=scenario_id).first()
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
+    s = Scenario.objects.filter(id=scenario_id, model__owner=request.user).first()
     if s:
         s.delete()
     return JsonResponse({}, status=204)
@@ -797,7 +975,10 @@ def scenario_delete(request, scenario_id):
 @require_http_methods(['PUT'])
 def scenario_upsert_change(request, scenario_id):
     """PUT /api/scenarios/:id/changes — body: ScenarioChange."""
-    s = get_object_or_404(Scenario, id=scenario_id)
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
+    s = _owned_scenario_or_404(request, scenario_id)
     data = _parse_json(request)
     if data is None:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
@@ -830,14 +1011,21 @@ def scenario_upsert_change(request, scenario_id):
 
 @require_http_methods(['DELETE'])
 def scenario_remove_change(request, scenario_id, change_id):
-    ScenarioChange.objects.filter(scenario_id=scenario_id, id=change_id).delete()
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
+    ScenarioChange.objects.filter(scenario_id=scenario_id, id=change_id, scenario__model__owner=request.user).delete()
     return JsonResponse({}, status=204)
 
 
+@csrf_exempt
 @require_http_methods(['PUT'])
 def scenario_save_results(request, scenario_id):
     """PUT /api/scenarios/:id/results — body: CalcResults."""
-    s = get_object_or_404(Scenario, id=scenario_id)
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
+    s = _owned_scenario_or_404(request, scenario_id)
     data = _parse_json(request)
     if data is None:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
@@ -845,12 +1033,17 @@ def scenario_save_results(request, scenario_id):
     return JsonResponse({})
 
 
+@csrf_exempt
 @require_http_methods(['PUT'])
 def scenario_basecase_save_results(request, model_id):
     """PUT /api/models/:modelId/scenarios/basecase/results — body: CalcResults."""
-    base = Scenario.objects.filter(model_id=model_id, is_basecase=True).first()
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
+    m = _owned_model_or_404(request, model_id)
+    base = Scenario.objects.filter(model=m, is_basecase=True).first()
     if not base:
-        base = Scenario.objects.create(id=uuid.uuid4(), model_id=model_id, name='Basecase', description='', is_basecase=True, status='calculated')
+        base = Scenario.objects.create(id=uuid.uuid4(), model=m, name='Basecase', description='', is_basecase=True, status='calculated')
     data = _parse_json(request)
     if data is None:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
@@ -863,32 +1056,34 @@ def scenario_basecase_save_results(request, model_id):
 @require_http_methods(['POST'])
 def seed_demo(request):
     """POST /api/models/seed-demo — create demo model from frontend createDemoModel() payload if needed."""
-    from django.utils import timezone
+    auth_err = _require_authenticated(request)
+    if auth_err:
+        return auth_err
     data = _parse_json(request)
     if data is None:
         data = {}
     # If client sends full demo model, use it; else we could generate server-side
-    model_id = data.get('id')
-    if not model_id:
-        model_id = uuid.uuid4()
+    model_id = data.get('id') or uuid.uuid4()
     name = data.get('name', 'Hub Manufacturing Cell — Demo')
+    try:
+        model_uuid = uuid.UUID(str(model_id))
+    except (ValueError, TypeError):
+        model_uuid = uuid.uuid4()
+
+    existing = RMCMModel.objects.filter(id=model_uuid).first()
+    if existing and existing.owner_id != request.user.id:
+        model_uuid = uuid.uuid4()
+
     RMCMModel.objects.get_or_create(
-        id=model_id,
+        id=model_uuid,
         defaults={
             'name': name,
             'description': data.get('description', ''),
             'tags': data.get('tags', ['Demo', 'Tutorial']),
             'run_status': 'never_run',
             'is_demo': True,
-            'general': data.get('general', {}),
             'param_names': data.get('param_names', {}),
-            'labor': data.get('labor', []),
-            'equipment': data.get('equipment', []),
-            'products': data.get('products', []),
-            'operations': data.get('operations', []),
-            'routing': data.get('routing', []),
-            'ibom': data.get('ibom', []),
-            'owner': request.user if request.user.is_authenticated else None,
+            'owner': request.user,
         },
     )
-    return JsonResponse({'id': str(model_id)}, status=201)
+    return JsonResponse({'id': str(model_uuid)}, status=201)

@@ -43,11 +43,25 @@ class RMCMModel(models.Model):
 
 class ModelVersion(models.Model):
     """Checkpoint/snapshot of a model for restore."""
+
+    KIND_MANUAL = "manual"
+    KIND_PRE_RESTORE = "pre_restore"
+    KIND_CHOICES = [
+        (KIND_MANUAL, "Manual"),
+        (KIND_PRE_RESTORE, "Pre-restore rollback"),
+    ]
+
     id = models.UUIDField(primary_key=True, editable=False)
     model = models.ForeignKey(RMCMModel, on_delete=models.CASCADE, related_name='versions')
     label = models.CharField(max_length=255)
+    version_kind = models.CharField(
+        max_length=20,
+        choices=KIND_CHOICES,
+        default=KIND_MANUAL,
+        db_index=True,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
-    snapshot = models.JSONField()  # { general, labor, equipment, products, operations, routing, ibom, param_names }
+    snapshot = models.JSONField()  # { general, labor, equipment, products, operations, routing, ibom, param_names, dept_codes }
 
     class Meta:
         ordering = ['-created_at']

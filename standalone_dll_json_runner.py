@@ -1,3 +1,12 @@
+"""
+Standalone runner: JSON model -> ctypes -> native MPX DLL export iopt_all.
+
+DLL numeric contract: all scalar and array inputs use C double (ctypes.c_double).
+Deploy a dll3.dll / dll2.dll (RMCT_DLL) built with matching iopt_all + double signatures.
+
+Optional JSON key "optimization" with "parts" list for lot/tbatch optimization after run_it.
+When omitted, numberOfParts=0 (calculate only, no optimization pass).
+"""
 import argparse
 import ctypes
 import json
@@ -98,8 +107,9 @@ def _iarr(values):
 
 
 def _farr(values):
+    """ctypes double array passed to DLL numeric parameters (float* -> double* in DLL)."""
     vals = [_to_float(v) for v in values]
-    return (ctypes.c_float * len(vals))(*vals)
+    return (ctypes.c_double * len(vals))(*vals)
 
 
 def _require_len(name, count, arr_name, arr):
@@ -121,34 +131,94 @@ def _add_dll_dir_to_search_path(dll_path):
 
 
 def _resolve_run_entry(dll):
+    """Bind exported iopt_all (run + optional lot/tbatch optimization)."""
     c_int_p = ctypes.POINTER(ctypes.c_int)
-    c_float_p = ctypes.POINTER(ctypes.c_float)
+    c_double_p = ctypes.POINTER(ctypes.c_double)
 
-    names = ("irun_it", "iRun_model", "irun_model", "iRunModel")
-    for name in names:
-        try:
-            fn = getattr(dll, name)
-        except AttributeError:
+    try:
+        fn = getattr(dll, "iopt_all")
+    except AttributeError as exc:
+        raise RuntimeError("DLL export iopt_all not found.") from exc
+
+    fn.restype = ctypes.c_int
+    fn.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_double, ctypes.c_double, ctypes.c_double,
+        ctypes.c_double, ctypes.c_double, ctypes.c_double,
+        ctypes.c_int, c_int_p, c_double_p, c_double_p, c_double_p, c_double_p, c_double_p, c_double_p, c_int_p,
+        ctypes.c_int, c_int_p, c_int_p, c_double_p, c_double_p, c_double_p, c_int_p, c_double_p, c_double_p, c_double_p, c_int_p,
+        ctypes.c_int, c_int_p, c_double_p, c_double_p, c_double_p, c_double_p, c_double_p, c_int_p,
+        ctypes.c_int, c_int_p, c_int_p, c_int_p, c_int_p, c_double_p,
+        c_double_p, c_double_p, c_double_p, c_double_p, c_double_p, c_double_p, c_double_p, c_double_p,
+        c_double_p, c_double_p, c_double_p, c_double_p,
+        ctypes.c_int, c_int_p, c_int_p, c_int_p, c_double_p,
+        ctypes.c_int, c_int_p, c_int_p, c_double_p,
+        ctypes.c_int,
+        # iopt_all optimization tail (after iWID)
+        ctypes.c_int, c_int_p, c_double_p, c_int_p, c_int_p, c_double_p, c_double_p,
+    ]
+    return fn, "iopt_all"
+
+
+def _empty_optimization_payload():
+    return (
+        ctypes.c_int(0),
+        ctypes.POINTER(ctypes.c_int)(),
+        ctypes.POINTER(ctypes.c_double)(),
+        ctypes.POINTER(ctypes.c_int)(),
+        ctypes.POINTER(ctypes.c_int)(),
+        ctypes.POINTER(ctypes.c_double)(),
+        ctypes.POINTER(ctypes.c_double)(),
+    )
+
+
+def _build_optimization_payload(data):
+    """
+    Trailing iopt_all args:
+      numberOfParts, partid[], weight[], optimizeLotSize[], OptimizeTbatch[],
+      lotsizeValue[], tbatchValue[]
+    """
+    if not isinstance(data, dict):
+        return _empty_optimization_payload()
+
+    opt = data.get("optimization")
+    rows = []
+    if isinstance(opt, dict):
+        rows = list(opt.get("parts") or [])
+    elif isinstance(opt, list):
+        rows = list(opt)
+
+    if not rows:
+        return _empty_optimization_payload()
+
+    part_ids = []
+    weights = []
+    opt_lot = []
+    opt_tb = []
+    lot_vals = []
+    tb_vals = []
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict):
             continue
+        part_ids.append(_to_int(row.get("part_index", row.get("part_id", row.get("partid", i + 1))), i + 1))
+        weights.append(_to_float(row.get("weight", row.get("value", 1.0)), 1.0))
+        opt_lot.append(_to_int(row.get("optimize_lot_size", row.get("optimizeLotSize", 0)), 0))
+        opt_tb.append(_to_int(row.get("optimize_tbatch", row.get("OptimizeTbatch", 0)), 0))
+        lot_vals.append(max(_to_float(row.get("lot_size", row.get("lotsizeValue", 1.0)), 1.0), 1.0))
+        tb_vals.append(_normalize_tbatch(row.get("tbatch_size", row.get("tbatchValue", 1.0))))
 
-        fn.restype = ctypes.c_int
-        fn.argtypes = [
-            ctypes.c_char_p,
-            ctypes.c_float, ctypes.c_float, ctypes.c_float,
-            ctypes.c_float, ctypes.c_float, ctypes.c_float,
-            ctypes.c_int, c_int_p, c_float_p, c_float_p, c_float_p, c_float_p, c_float_p, c_float_p, c_int_p,
-            ctypes.c_int, c_int_p, c_int_p, c_float_p, c_float_p, c_float_p, c_int_p, c_float_p, c_float_p, c_float_p, c_int_p,
-            ctypes.c_int, c_int_p, c_float_p, c_float_p, c_float_p, c_float_p, c_float_p, c_int_p,
-            ctypes.c_int, c_int_p, c_int_p, c_int_p, c_int_p, c_float_p,
-            c_float_p, c_float_p, c_float_p, c_float_p, c_float_p, c_float_p, c_float_p, c_float_p,
-            c_float_p, c_float_p, c_float_p, c_float_p,
-            ctypes.c_int, c_int_p, c_int_p, c_int_p, c_float_p,
-            ctypes.c_int, c_int_p, c_int_p, c_float_p,
-            ctypes.c_int,
-        ]
-        return fn, name
+    if not part_ids:
+        return _empty_optimization_payload()
 
-    raise RuntimeError("No run entry found. Tried irun_it, iRun_model, irun_model, iRunModel")
+    return (
+        ctypes.c_int(len(part_ids)),
+        _iarr(part_ids),
+        _farr(weights),
+        _iarr(opt_lot),
+        _iarr(opt_tb),
+        _farr(lot_vals),
+        _farr(tb_vals),
+    )
 
 
 def _normalize_tbatch(value):
@@ -156,6 +226,16 @@ def _normalize_tbatch(value):
     if v == -1.0:
         return -1.0
     return v if v > 0 else -1.0
+
+
+def _operation_sort_key(op):
+    """Deterministic operation ordering: product -> flag -> op number."""
+    flag_priority = {0: 0, 1: 1, 2: 2, 4: 3}
+    return (
+        str(op.get("product_id", "")),
+        flag_priority.get(_to_int(op.get("flag", 4), 4), 99),
+        _to_int(op.get("op_number", 0), 0),
+    )
 
 
 def _has_fatal_results_error(output_dir):
@@ -182,28 +262,39 @@ def _build_payload_from_model_lists(
     general = data.get("general", {})
     labor = data.get("labor", [])
     equipment = data.get("equipment", [])
-    products = data.get("products", [])
-    operations = data.get("operations", [])
-    routing = data.get("routing", [])
+    products = list(data.get("products", []))
+    operations = list(data.get("operations", []))
+    routing = list(data.get("routing", []))
     ibom = data.get("ibom", [])
 
-    product_map = {p.get("id"): i + 1 for i, p in enumerate(products)}
-    labor_map = {l.get("id"): i + 1 for i, l in enumerate(labor)}
-    equip_map = {e.get("id"): i + 1 for i, e in enumerate(equipment)}
+    if not products:
+        raise ValueError("JSON has no products.")
+    if not operations:
+        raise ValueError("JSON has no operations.")
+
+    product_ids = [_to_int(p.get("id"), i + 1) for i, p in enumerate(products)]
+    labor_ids = [_to_int(l.get("id"), i + 1) for i, l in enumerate(labor)]
+    equip_ids = [_to_int(e.get("id"), i + 1) for i, e in enumerate(equipment)]
+
+    product_map = {p.get("id"): product_ids[i] for i, p in enumerate(products)}
+    labor_map = {l.get("id"): labor_ids[i] for i, l in enumerate(labor)}
+    equip_map = {e.get("id"): equip_ids[i] for i, e in enumerate(equipment)}
+    default_labor_id = labor_ids[0] if labor_ids else 1
+    default_equip_id = equip_ids[0] if equip_ids else 1
 
     general_payload = [
-        ctypes.c_float(_to_float(general.get("conv1", 1.0), 1.0)),
-        ctypes.c_float(_to_float(general.get("conv2", 1.0), 1.0)),
-        ctypes.c_float(_to_float(general.get("util_limit", 95.0), 95.0)),
-        ctypes.c_float(_to_float(general.get("var_labor", 30.0), 30.0)),
-        ctypes.c_float(_to_float(general.get("var_equip", 30.0), 30.0)),
-        ctypes.c_float(_to_float(general.get("var_prod", 30.0), 30.0)),
+        ctypes.c_double(_to_float(general.get("conv1", 1.0), 1.0)),
+        ctypes.c_double(_to_float(general.get("conv2", 1.0), 1.0)),
+        ctypes.c_double(_to_float(general.get("util_limit", 95.0), 95.0)),
+        ctypes.c_double(_to_float(general.get("var_labor", 30.0), 30.0)),
+        ctypes.c_double(_to_float(general.get("var_equip", 30.0), 30.0)),
+        ctypes.c_double(_to_float(general.get("var_prod", 30.0), 30.0)),
     ]
 
     l_count = len(labor)
     labor_payload = [
         ctypes.c_int(l_count),
-        _iarr([i + 1 for i in range(l_count)]),
+        _iarr(labor_ids),
         _farr([l.get("count", 1) for l in labor]),
         _farr([l.get("overtime_pct", 0) for l in labor]),
         _farr([l.get("unavail_pct", 0) for l in labor]),
@@ -216,12 +307,12 @@ def _build_payload_from_model_lists(
     eq_count = len(equipment)
     equipment_payload = [
         ctypes.c_int(eq_count),
-        _iarr([i + 1 for i in range(eq_count)]),
-        _iarr([e.get("count", 1) for e in equipment]),
+        _iarr(equip_ids),
+        _iarr([_to_int(e.get("count", 1), 1) for e in equipment]),
         _farr([e.get("mttf", 1) for e in equipment]),
         _farr([e.get("mttr", 1) for e in equipment]),
         _farr([e.get("overtime_pct", 0) for e in equipment]),
-        _iarr([labor_map.get(e.get("labor_group_id"), 1) for e in equipment]),
+        _iarr([labor_map.get(e.get("labor_group_id"), default_labor_id) for e in equipment]),
         _farr([e.get("setup_factor", 1) for e in equipment]),
         _farr([e.get("run_factor", 1) for e in equipment]),
         _farr([e.get("var_factor", 1) for e in equipment]),
@@ -245,7 +336,7 @@ def _build_payload_from_model_lists(
     p_count = len(products)
     parts_payload = [
         ctypes.c_int(p_count),
-        _iarr([i + 1 for i in range(p_count)]),
+        _iarr(product_ids),
         _farr([max(_to_float(p.get("demand", 0), 0), 0.0) for p in products]),
         _farr([max(_to_float(p.get("lot_size", 1), 1), 1.0) for p in products]),
         _farr([_normalize_tbatch(p.get("tbatch_size", 1)) for p in products]),
@@ -262,7 +353,7 @@ def _build_payload_from_model_lists(
             part_idx = product_map.get(op.get("product_id"))
             if not part_idx:
                 continue
-            op_id = len(normalized_ops) + 1
+            op_id = _to_int(op.get("id"))
             op_name = str(op.get("op_name", "")).strip().upper()
             row = {
                 "part_idx": part_idx,
@@ -290,7 +381,7 @@ def _build_payload_from_model_lists(
             real_op_ids_by_part.setdefault(part_idx, []).append(op_id)
     else:
         ops_by_part = defaultdict(list)
-        for op in operations:
+        for op in sorted(operations, key=_operation_sort_key):
             part_idx = product_map.get(op.get("product_id"))
             if part_idx:
                 ops_by_part[part_idx].append(op)
@@ -301,12 +392,12 @@ def _build_payload_from_model_lists(
         def append_op(part_idx, op_name, src=None, force_blank_equip=False):
             src = src or {}
             equip_id = "" if force_blank_equip else src.get("equip_id", "")
-            op_id = len(normalized_ops) + 1
-            opnum_from_json = max(_to_int(src.get("op_number", op_id), op_id), 0)
+            seq_id = len(normalized_ops) + 1
+            opnum_from_json = max(_to_int(src.get("op_number", seq_id), seq_id), 0)
             row = {
                 "part_idx": part_idx,
-                "op_id": op_id,
-                "opnum": op_id if force_safe_routing else opnum_from_json,
+                "op_id": _to_int(src.get("id", seq_id), seq_id),
+                "opnum": seq_id if force_safe_routing else opnum_from_json,
                 "op_name": op_name,
                 "equip_id": equip_id,
                 "pct_assigned": _to_float(src.get("pct_assigned", 100), 100),
@@ -324,31 +415,47 @@ def _build_payload_from_model_lists(
                 "labor_run_piece": _to_float(src.get("labor_run_piece", 0), 0),
             }
             normalized_ops.append(row)
-            name_to_ids[(part_idx, op_name)].append(op_id)
-            return op_id
+            route_op_id = row["op_id"]
+            name_to_ids[(part_idx, op_name)].append(route_op_id)
+            return route_op_id
 
-        for part_idx in range(1, p_count + 1):
+        for part_idx in product_ids:
             part_ops = ops_by_part.get(part_idx, [])
             dock_src = next((o for o in part_ops if str(o.get("op_name", "")).strip().upper() == "DOCK"), {})
+            stock_src = next((o for o in part_ops if str(o.get("op_name", "")).strip().upper() == "STOCK"), {})
+            scrap_src = next((o for o in part_ops if str(o.get("op_name", "")).strip().upper() == "SCRAP"), {})
             append_op(part_idx, "DOCK", dock_src, force_blank_equip=True)
-            stock_id = append_op(part_idx, "STOCK", {"pct_assigned": 100}, force_blank_equip=True)
-            scrap_id = append_op(part_idx, "SCRAP", {"pct_assigned": 100}, force_blank_equip=True)
-            real_ops = [o for o in part_ops if str(o.get("op_name", "")).strip().upper() not in {"DOCK", "STOCK", "SCRAP"}]
-            real_ops.sort(key=lambda o: _to_int(o.get("op_number", 0), 0))
+            if not stock_src:
+                stock_src = {"pct_assigned": 100, "op_number": 10000}
+            if not scrap_src:
+                scrap_src = {"pct_assigned": 100, "op_number": 10001}
+            stock_id = append_op(part_idx, "STOCK", stock_src, force_blank_equip=True)
+            scrap_id = append_op(part_idx, "SCRAP", scrap_src, force_blank_equip=True)
+            real_ops = [
+                o for o in part_ops
+                if str(o.get("op_name", "")).strip().upper() not in {"DOCK", "STOCK", "SCRAP"}
+            ]
             real_ids = []
             for op in real_ops:
-                real_ids.append(append_op(part_idx, str(op.get("op_name", "")).strip().upper(), op, force_blank_equip=False))
+                real_ids.append(
+                    append_op(part_idx, str(op.get("op_name", "")).strip().upper(), op, force_blank_equip=False)
+                )
             if force_safe_routing and len(real_ids) == 1:
                 base = real_ops[0]
                 fake_src = dict(base)
                 fake_src["op_number"] = _to_int(base.get("op_number", 0), 0) + 1
-                for fld in (
-                    "equip_setup_lot", "equip_setup_tbatch", "equip_setup_piece",
-                    "equip_run_lot", "equip_run_tbatch", "equip_run_piece",
-                    "labor_setup_lot", "labor_setup_tbatch", "labor_setup_piece",
-                    "labor_run_lot", "labor_run_tbatch", "labor_run_piece",
-                ):
-                    fake_src[fld] = 0
+                fake_src["equip_setup_lot"] = 0
+                fake_src["equip_setup_tbatch"] = 0
+                fake_src["equip_setup_piece"] = 0
+                fake_src["equip_run_lot"] = 0
+                fake_src["equip_run_tbatch"] = 0
+                fake_src["equip_run_piece"] = 0
+                fake_src["labor_setup_lot"] = 0
+                fake_src["labor_setup_tbatch"] = 0
+                fake_src["labor_setup_piece"] = 0
+                fake_src["labor_run_lot"] = 0
+                fake_src["labor_run_tbatch"] = 0
+                fake_src["labor_run_piece"] = 0
                 for n in range(5):
                     fake_src["op_number"] = _to_int(fake_src.get("op_number", 0), 0) + 1
                     real_ids.append(append_op(part_idx, f"BUFFER{n+1}", fake_src, force_blank_equip=False))
@@ -363,7 +470,7 @@ def _build_payload_from_model_lists(
         _iarr([r["op_id"] for r in normalized_ops]),
         _iarr([r["opnum"] for r in normalized_ops]),
         _iarr([r["part_idx"] for r in normalized_ops]),
-        _iarr([equip_map.get(r["equip_id"], 1) if r["equip_id"] else 1 for r in normalized_ops]),
+        _iarr([equip_map.get(r["equip_id"], default_equip_id) if r["equip_id"] else default_equip_id for r in normalized_ops]),
         _farr([r["pct_assigned"] for r in normalized_ops]),
         _farr([r["equip_setup_lot"] for r in normalized_ops]),
         _farr([r["equip_setup_tbatch"] for r in normalized_ops]),
@@ -382,14 +489,14 @@ def _build_payload_from_model_lists(
     route_rows = []
     stock_for_part = {}
     scrap_for_part = {}
-    for part_idx in range(1, p_count + 1):
+    for part_idx in product_ids:
         if name_to_ids.get((part_idx, "STOCK")):
             stock_for_part[part_idx] = name_to_ids[(part_idx, "STOCK")][0]
         if name_to_ids.get((part_idx, "SCRAP")):
             scrap_for_part[part_idx] = name_to_ids[(part_idx, "SCRAP")][0]
 
     if force_safe_routing and (not strict_json_routing):
-        for part_idx in range(1, p_count + 1):
+        for part_idx in product_ids:
             dock = name_to_ids[(part_idx, "DOCK")][0]
             stock = stock_for_part[part_idx]
             scrap = scrap_for_part[part_idx]
@@ -404,20 +511,24 @@ def _build_payload_from_model_lists(
                 route_rows.append((part_idx, dock, stock, 99.9999))
                 route_rows.append((part_idx, dock, scrap, 0.0001))
             route_rows.append((part_idx, stock, stock, 100.0))
-            # DLL rejects any operation that routes 100% to SCRAP.
-            route_rows.append((part_idx, scrap, stock, 0.0001))
-            route_rows.append((part_idx, scrap, scrap, 99.9999))
+            route_rows.append((part_idx, scrap, scrap, 100.0))
     else:
         for rt in routing:
             part_idx = product_map.get(rt.get("product_id"))
             if not part_idx:
                 continue
-            from_key = (part_idx, str(rt.get("from_op_name", "")).strip().upper())
-            to_key = (part_idx, str(rt.get("to_op_name", "")).strip().upper())
-            from_list = name_to_ids.get(from_key)
-            to_list = name_to_ids.get(to_key)
-            from_op = from_list[0] if from_list else None
-            to_op = to_list[0] if to_list else None
+            from_op_raw = rt.get("from_op_id", None)
+            to_op_raw = rt.get("to_op_id", None)
+            from_op = _to_int(from_op_raw) if from_op_raw not in (None, "") else None
+            to_op = _to_int(to_op_raw) if to_op_raw not in (None, "") else None
+            if from_op is None:
+                from_key = (part_idx, str(rt.get("from_op_name", "")).strip().upper())
+                from_list = name_to_ids.get(from_key)
+                from_op = from_list[0] if from_list else None
+            if to_op is None:
+                to_key = (part_idx, str(rt.get("to_op_name", "")).strip().upper())
+                to_list = name_to_ids.get(to_key)
+                to_op = to_list[0] if to_list else None
             if from_op is None or to_op is None:
                 continue
             route_rows.append((part_idx, from_op, to_op, _to_float(rt.get("pct_routed", 0), 0)))
@@ -435,7 +546,11 @@ def _build_payload_from_model_lists(
             scaled = [(to_op, pct * scale) for to_op, pct in targets]
             scrap_id = scrap_for_part.get(pidx)
             stock_id = stock_for_part.get(pidx)
-            only_scrap = scrap_id is not None and all(to_op == scrap_id for to_op, _ in scaled) and stock_id is not None
+            only_scrap = (
+                scrap_id is not None
+                and all(to_op == scrap_id for to_op, _ in scaled)
+                and stock_id is not None
+            )
             if only_scrap:
                 normalized.append((pidx, from_op, stock_id, 0.0001))
                 normalized.append((pidx, from_op, scrap_id, 99.9999))
@@ -446,7 +561,7 @@ def _build_payload_from_model_lists(
 
     if force_safe_routing and (not strict_json_routing):
         if not route_rows:
-            for part_idx in range(1, p_count + 1):
+            for part_idx in product_ids:
                 dock = name_to_ids[(part_idx, "DOCK")][0]
                 route_rows.append((part_idx, dock, stock_for_part[part_idx], 99.9999))
                 route_rows.append((part_idx, dock, scrap_for_part[part_idx], 0.0001))
@@ -454,7 +569,7 @@ def _build_payload_from_model_lists(
         grouped_targets = defaultdict(list)
         for pidx, from_op, to_op, pct in route_rows:
             grouped_targets[(pidx, from_op)].append((to_op, pct))
-        for part_idx in range(1, p_count + 1):
+        for part_idx in product_ids:
             stock_op = stock_for_part[part_idx]
             scrap_op = scrap_for_part[part_idx]
             if (part_idx, stock_op) not in grouped_targets:
@@ -477,9 +592,7 @@ def _build_payload_from_model_lists(
             scaled = [(to_op, pct * scale) for to_op, pct in targets]
             only_scrap = all(to_op == scrap_op for to_op, _ in scaled)
             if only_scrap:
-                # Keep a tiny non-scrap branch; required by DLL constraints.
-                normalized_routes.append((pidx, from_op, stock_op, 0.0001))
-                normalized_routes.append((pidx, from_op, scrap_op, 99.9999))
+                normalized_routes.append((pidx, from_op, scrap_op, 100.0))
             else:
                 for to_op, pct in scaled:
                     normalized_routes.append((pidx, from_op, to_op, pct))
@@ -487,6 +600,8 @@ def _build_payload_from_model_lists(
     else:
         if not route_rows:
             raise ValueError("No valid routing rows could be mapped from JSON.")
+
+    route_rows.sort(key=lambda r: (r[0], r[1], r[2]))
 
     routes_payload = [
         ctypes.c_int(len(route_rows)),
@@ -507,7 +622,7 @@ def _build_payload_from_model_lists(
         ctypes.c_int(len(ib_rows)),
         _iarr([r[0] for r in ib_rows]) if ib_rows else ctypes.POINTER(ctypes.c_int)(),
         _iarr([r[1] for r in ib_rows]) if ib_rows else ctypes.POINTER(ctypes.c_int)(),
-        _farr([r[2] for r in ib_rows]) if ib_rows else ctypes.POINTER(ctypes.c_float)(),
+        _farr([r[2] for r in ib_rows]) if ib_rows else ctypes.POINTER(ctypes.c_double)(),
     ]
     return {
         "general": tuple(general_payload),
@@ -517,6 +632,7 @@ def _build_payload_from_model_lists(
         "operations": tuple(operations_payload),
         "routes": tuple(routes_payload),
         "ibom": tuple(ibom_payload),
+        "optimization": _build_optimization_payload(data),
     }
 
 
@@ -603,12 +719,12 @@ def _payload_from_json(data):
 
     payload = {
         "general": (
-        ctypes.c_float(_to_float(general.get("time1", 1.0), 1.0)),
-        ctypes.c_float(_to_float(general.get("time2", 1.0), 1.0)),
-        ctypes.c_float(_to_float(general.get("u_limit", 95.0), 95.0)),
-        ctypes.c_float(_to_float(general.get("lab_var", 30.0), 30.0)),
-        ctypes.c_float(_to_float(general.get("eq_var", 30.0), 30.0)),
-        ctypes.c_float(_to_float(general.get("part_var", 30.0), 30.0)),
+        ctypes.c_double(_to_float(general.get("time1", 1.0), 1.0)),
+        ctypes.c_double(_to_float(general.get("time2", 1.0), 1.0)),
+        ctypes.c_double(_to_float(general.get("u_limit", 95.0), 95.0)),
+        ctypes.c_double(_to_float(general.get("lab_var", 30.0), 30.0)),
+        ctypes.c_double(_to_float(general.get("eq_var", 30.0), 30.0)),
+        ctypes.c_double(_to_float(general.get("part_var", 30.0), 30.0)),
         ),
         "labor": (
         ctypes.c_int(labor_count),
@@ -637,6 +753,7 @@ def _payload_from_json(data):
         ctypes.c_int(ibom_count),
         _iarr(b_x1), _iarr(b_x2), _farr(b_x3),
         ),
+        "optimization": _build_optimization_payload(data),
     }
     return payload
 
@@ -690,6 +807,7 @@ def run_model_from_json(json_path, dll_path=None, output_dir=None, wid=1, routin
             *payload_dict["routes"],
             *payload_dict["ibom"],
             ctypes.c_int(wid),
+            *payload_dict["optimization"],
         )
         print(f"{run_name} -> {rc_val}")
         return rc_val
@@ -704,7 +822,7 @@ def run_model_from_json(json_path, dll_path=None, output_dir=None, wid=1, routin
             data,
             force_safe_routing=False,
             strict_json_routing=False,
-            normalize_json_routing=True,
+            normalize_json_routing=False,
         )
         return _run_once(payload), "json"
     if routing_mode == "safe":
@@ -767,7 +885,9 @@ def main():
         routing_mode=args.routing_mode,
     )
     print(f"Routing mode used: {used_mode}")
-    raise SystemExit(0 if rc == 0 else rc)
+    out_dir = os.path.abspath(args.out) if args.out else os.path.dirname(os.path.abspath(args.json))
+    # Legacy DLL often returns -1 even when the run succeeded; use results.err severity.
+    raise SystemExit(0 if not _has_fatal_results_error(out_dir) else (rc if rc != 0 else 1))
 
 
 if __name__ == "__main__":

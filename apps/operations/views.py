@@ -39,7 +39,6 @@ def model_operations_create(request, model_id):
     op_id = data.get('id')
     product_id = data.get('product_id')
     product = get_object_or_404(Product, id=product_id)
-    print(data)
     equip_id = data.get('equip_id')
     equipment_group = None
     if equip_id:
@@ -56,6 +55,18 @@ def model_operations_create(request, model_id):
         'equipment_run_per_piece': data.get('equip_run_piece', 0),
         'labor_setup_per_lot': data.get('labor_setup_lot', 0),
         'labor_run_per_piece': data.get('labor_run_piece', 0),
+        'equipment_setup_per_piece': data.get('equip_setup_piece', 0),
+        'equipment_setup_per_tbatch': data.get('equip_setup_tbatch', 0),
+        'equipment_run_per_lot': data.get('equip_run_lot', 0),
+        'equipment_run_per_tbatch': data.get('equip_run_tbatch', 0),
+        'labor_setup_per_piece': data.get('labor_setup_piece', 0),
+        'labor_setup_per_tbatch': data.get('labor_setup_tbatch', 0),
+        'labor_run_per_lot': data.get('labor_run_lot', 0),
+        'labor_run_per_tbatch': data.get('labor_run_tbatch', 0),
+        'oper1': data.get('oper1', 0),
+        'oper2': data.get('oper2', 0),
+        'oper3': data.get('oper3', 0),
+        'oper4': data.get('oper4', 0),
         'comments': '',
     }
 
@@ -91,6 +102,18 @@ def model_operations_create(request, model_id):
             existing.equipment_run_per_piece = operation_kwargs["equipment_run_per_piece"]
             existing.labor_setup_per_lot = operation_kwargs["labor_setup_per_lot"]
             existing.labor_run_per_piece = operation_kwargs["labor_run_per_piece"]
+            existing.equipment_setup_per_piece = operation_kwargs["equipment_setup_per_piece"]
+            existing.equipment_setup_per_tbatch = operation_kwargs["equipment_setup_per_tbatch"]
+            existing.equipment_run_per_lot = operation_kwargs["equipment_run_per_lot"]
+            existing.equipment_run_per_tbatch = operation_kwargs["equipment_run_per_tbatch"]
+            existing.labor_setup_per_piece = operation_kwargs["labor_setup_per_piece"]
+            existing.labor_setup_per_tbatch = operation_kwargs["labor_setup_per_tbatch"]
+            existing.labor_run_per_lot = operation_kwargs["labor_run_per_lot"]
+            existing.labor_run_per_tbatch = operation_kwargs["labor_run_per_tbatch"]
+            existing.oper1 = operation_kwargs["oper1"]
+            existing.oper2 = operation_kwargs["oper2"]
+            existing.oper3 = operation_kwargs["oper3"]
+            existing.oper4 = operation_kwargs["oper4"]
             existing.comments = operation_kwargs["comments"]
             existing.save()
 
@@ -138,6 +161,30 @@ def model_operations_update(request, model_id, op_id):
         op.labor_setup_per_lot = data['labor_setup_lot']
     if 'labor_run_piece' in data:
         op.labor_run_per_piece = data['labor_run_piece']
+    if 'equip_setup_piece' in data:
+        op.equipment_setup_per_piece = data['equip_setup_piece']
+    if 'equip_setup_tbatch' in data:
+        op.equipment_setup_per_tbatch = data['equip_setup_tbatch']
+    if 'equip_run_lot' in data:
+        op.equipment_run_per_lot = data['equip_run_lot']
+    if 'equip_run_tbatch' in data:
+        op.equipment_run_per_tbatch = data['equip_run_tbatch']
+    if 'labor_setup_piece' in data:
+        op.labor_setup_per_piece = data['labor_setup_piece']
+    if 'labor_setup_tbatch' in data:
+        op.labor_setup_per_tbatch = data['labor_setup_tbatch']
+    if 'labor_run_lot' in data:
+        op.labor_run_per_lot = data['labor_run_lot']
+    if 'labor_run_tbatch' in data:
+        op.labor_run_per_tbatch = data['labor_run_tbatch']
+    if 'oper1' in data:
+        op.oper1 = data['oper1']
+    if 'oper2' in data:
+        op.oper2 = data['oper2']
+    if 'oper3' in data:
+        op.oper3 = data['oper3']
+    if 'oper4' in data:
+        op.oper4 = data['oper4']
     if 'equip_id' in data:
         equip_id = data.get('equip_id') or None
         if equip_id:

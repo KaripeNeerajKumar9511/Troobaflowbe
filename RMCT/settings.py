@@ -56,7 +56,12 @@ INSTALLED_APPS = [
     'apps.auth',
     'apps.ibom',
     'apps.generaldata',
+    'apps.admin.apps.TfAdminConfig',
 ]
+
+# TF Admin portal (override via environment in production)
+TF_ADMIN_EMAIL = 'admin@gmail.com'
+TF_ADMIN_PASSWORD = '12345678'
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',

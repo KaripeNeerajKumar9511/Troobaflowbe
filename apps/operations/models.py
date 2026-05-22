@@ -56,6 +56,20 @@ class Operation(models.Model):
 
     labor_run_per_piece = models.FloatField(default=0)
 
+    # Extended timing (matches frontend "Show Advanced" columns)
+    equipment_setup_per_piece = models.FloatField(default=0)
+    equipment_setup_per_tbatch = models.FloatField(default=0)
+    equipment_run_per_lot = models.FloatField(default=0)
+    equipment_run_per_tbatch = models.FloatField(default=0)
+    labor_setup_per_piece = models.FloatField(default=0)
+    labor_setup_per_tbatch = models.FloatField(default=0)
+    labor_run_per_lot = models.FloatField(default=0)
+    labor_run_per_tbatch = models.FloatField(default=0)
+    oper1 = models.FloatField(default=0)
+    oper2 = models.FloatField(default=0)
+    oper3 = models.FloatField(default=0)
+    oper4 = models.FloatField(default=0)
+
     FORMULA_CHOICES = [
         ("E_SETUP_LOT", "E.Setup/Lot"),
         ("E_RUN_PC", "E.Run/Pc"),

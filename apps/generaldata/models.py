@@ -40,6 +40,7 @@ class GeneralData(models.Model):
         ("DAY", "Day"),
         ("WEEK", "Week"),
         ("MONTH", "Month"),
+        ("QUARTER", "Quarter"),
         ("YEAR", "Year"),
     ]
 
@@ -54,7 +55,7 @@ class GeneralData(models.Model):
         default="DAY",
     )
     prod_period_unit = models.CharField(
-        max_length=5,
+        max_length=7,
         choices=PROD_PERIOD_UNIT_CHOICES,
         default="YEAR",
     )
