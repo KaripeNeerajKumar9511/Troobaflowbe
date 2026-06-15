@@ -11,6 +11,8 @@ from apps.routing.models import Routing
 from apps.ibom.models import BOM
 
 from .models import Product
+from apps.organizations.scoping import get_org_context
+from apps.organizations.nested_rows import revive_soft_deleted, sync_row_organization
 
 
 def _parse_json(request):
@@ -23,16 +25,15 @@ def _parse_json(request):
 @csrf_exempt
 @require_http_methods(['POST'])
 def model_products_create(request, model_id):
-    m = get_object_or_404(RMCMModel, id=model_id)
+    ctx, err = get_org_context(request)
+    if err:
+        return err
+    m = get_object_or_404(RMCMModel, id=model_id, organization_id=ctx.organization.id)
     data = _parse_json(request)
     if data is None:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
 
-    owner = m.owner
-    if owner is None or not hasattr(owner, "profile") or not getattr(owner.profile, "organization_id", None):
-        return JsonResponse({'error': 'Owner organization not configured for model'}, status=400)
-
-    org = owner.profile.organization
+    org = ctx.organization
 
     pid = data.get('id')
     prod_kwargs = {
@@ -107,12 +108,19 @@ def model_products_create(request, model_id):
 @csrf_exempt
 @require_http_methods(['PATCH'])
 def model_products_update(request, model_id, product_id):
-    m = get_object_or_404(RMCMModel, id=model_id)
+    ctx, err = get_org_context(request)
+    if err:
+        return err
+    m = get_object_or_404(RMCMModel, id=model_id, organization_id=ctx.organization.id)
     data = _parse_json(request)
     if data is None:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
 
-    p = get_object_or_404(Product, id=product_id, model=m)
+    p = Product.objects.filter(id=product_id, model=m).first()
+    if p is None:
+        return JsonResponse({'error': 'Product not found for this model'}, status=404)
+    sync_row_organization(p, ctx.organization)
+    revive_soft_deleted(p)
 
     if 'name' in data:
         p.name = data['name']
@@ -148,11 +156,14 @@ def model_products_update(request, model_id, product_id):
 @csrf_exempt
 @require_http_methods(['DELETE'])
 def model_products_delete(request, model_id, product_id):
-    m = get_object_or_404(RMCMModel, id=model_id)
-    try:
-        p = Product.objects.get(id=product_id, model=m)
-    except Product.DoesNotExist:
-        return JsonResponse({}, status=204)
+    ctx, err = get_org_context(request)
+    if err:
+        return err
+    m = get_object_or_404(RMCMModel, id=model_id, organization_id=ctx.organization.id)
+    p = Product.objects.filter(id=product_id, model=m).first()
+    if p is None:
+        return JsonResponse({"success": True}, status=200)
+    sync_row_organization(p, ctx.organization)
 
     from django.utils import timezone
 
@@ -164,21 +175,24 @@ def model_products_delete(request, model_id, product_id):
     Routing.objects.filter(product_id=product_id, deleted_at__isnull=True).update(deleted_at=now)
     BOM.objects.filter(parent_product_id=product_id, deleted_at__isnull=True).update(deleted_at=now)
 
-    return JsonResponse({}, status=204)
+    return JsonResponse({"success": True}, status=200)
 
 
 @csrf_exempt
 @require_http_methods(['DELETE'])
 def model_products_clear_ops_routing(request, model_id, product_id):
-    m = get_object_or_404(RMCMModel, id=model_id)
+    ctx, err = get_org_context(request)
+    if err:
+        return err
+    m = get_object_or_404(RMCMModel, id=model_id, organization_id=ctx.organization.id)
 
     from django.utils import timezone
 
     now = timezone.now()
-    Operation.objects.filter(product_id=product_id, deleted_at__isnull=True).update(deleted_at=now)
-    Routing.objects.filter(product_id=product_id, deleted_at__isnull=True).update(deleted_at=now)
+    Operation.objects.filter(product_id=product_id, organization_id=ctx.organization.id, deleted_at__isnull=True).update(deleted_at=now)
+    Routing.objects.filter(product_id=product_id, organization_id=ctx.organization.id, deleted_at__isnull=True).update(deleted_at=now)
 
     m.run_status = 'needs_recalc'
     m.save()
 
-    return JsonResponse({}, status=204)
+    return JsonResponse({"success": True}, status=200)

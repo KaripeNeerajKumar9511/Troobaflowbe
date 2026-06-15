@@ -4,7 +4,7 @@ from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 
 from apps.rmct.models import RMCMModel
 from apps.equipment.models import EquipmentGroup
@@ -13,6 +13,8 @@ from apps.routing.models import Routing
 from apps.products.models import Product
 
 from .models import Operation
+from apps.organizations.scoping import get_org_context
+from apps.organizations.nested_rows import revive_soft_deleted, sync_row_organization
 
 
 def _parse_json(request):
@@ -25,30 +27,48 @@ def _parse_json(request):
 @csrf_exempt
 @require_http_methods(['POST'])
 def model_operations_create(request, model_id):
-    m = get_object_or_404(RMCMModel, id=model_id)
+    ctx, err = get_org_context(request)
+    if err:
+        return err
+    m = get_object_or_404(RMCMModel, id=model_id, organization_id=ctx.organization.id)
     data = _parse_json(request)
     if data is None:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
 
-    owner = m.owner
-    if owner is None or not hasattr(owner, "profile") or not getattr(owner.profile, "organization_id", None):
-        return JsonResponse({'error': 'Owner organization not configured for model'}, status=400)
-
-    org = owner.profile.organization
+    org = ctx.organization
 
     op_id = data.get('id')
     product_id = data.get('product_id')
-    product = get_object_or_404(Product, id=product_id)
+    product = get_object_or_404(Product, id=product_id, organization_id=ctx.organization.id)
     equip_id = data.get('equip_id')
     equipment_group = None
     if equip_id:
         equipment_group = EquipmentGroup.objects.filter(id=equip_id).first()
 
+    op_name = str(data.get('op_name', '') or '').strip()
+    op_name_upper = op_name.upper()
+
+    if op_name_upper == 'DOCK':
+        existing_dock = Operation.objects.filter(
+            organization=org,
+            product=product,
+            deleted_at__isnull=True,
+            name__iexact='DOCK',
+        ).first()
+        if existing_dock:
+            if existing_dock.op_number != 0:
+                existing_dock.op_number = 0
+                existing_dock.save(update_fields=['op_number'])
+            from apps.operations.normalize import dedupe_routing_meta_operations_for_product
+
+            dedupe_routing_meta_operations_for_product(product)
+            return JsonResponse({'id': str(existing_dock.id)}, status=200)
+
     operation_kwargs = {
         'organization': org,
         'product': product,
-        'op_number': data.get('op_number', 1),
-        'name': data.get('op_name', ''),
+        'op_number': 0 if op_name_upper == 'DOCK' else data.get('op_number', 1),
+        'name': op_name,
         'equipment_group': equipment_group,
         'percent_assign': data.get('pct_assigned', 100),
         'equipment_setup_per_lot': data.get('equip_setup_lot', 0),
@@ -117,6 +137,9 @@ def model_operations_create(request, model_id):
             existing.comments = operation_kwargs["comments"]
             existing.save()
 
+        from apps.operations.normalize import dedupe_routing_meta_operations_for_product
+
+        dedupe_routing_meta_operations_for_product(product)
         return JsonResponse(
             {
                 "id": str(existing.id),
@@ -125,27 +148,38 @@ def model_operations_create(request, model_id):
             status=200,
         )
 
+    from apps.operations.normalize import dedupe_routing_meta_operations_for_product
+
+    dedupe_routing_meta_operations_for_product(product)
+
     return JsonResponse({'id': str(op.id)}, status=201)
 
 
 @csrf_exempt
 @require_http_methods(['PATCH'])
 def model_operations_update(request, model_id, op_id):
-    get_object_or_404(RMCMModel, id=model_id)
+    ctx, err = get_org_context(request)
+    if err:
+        return err
+    m = get_object_or_404(RMCMModel, id=model_id, organization_id=ctx.organization.id)
     data = _parse_json(request)
     if data is None:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
 
-    # Primary lookup by id; if that fails (e.g. client still has a stale id),
-    # fall back to the unique (product, op_number) pair when available.
-    op = Operation.objects.filter(id=op_id).first()
+    op = Operation.objects.filter(id=op_id, product__model=m).first()
     if op is None:
         product_id = data.get('product_id')
         op_number = data.get('op_number')
         if product_id is not None and op_number is not None:
-            op = Operation.objects.filter(product_id=product_id, op_number=op_number).first()
+            op = Operation.objects.filter(
+                product_id=product_id,
+                product__model=m,
+                op_number=op_number,
+            ).first()
     if op is None:
         return JsonResponse({'error': 'Operation not found'}, status=404)
+    sync_row_organization(op, ctx.organization)
+    revive_soft_deleted(op)
 
     if 'op_name' in data:
         op.name = data['op_name']
@@ -198,25 +232,38 @@ def model_operations_update(request, model_id, op_id):
         else:
             op.labor = None
 
+    new_op_number = data.get('op_number')
+    if new_op_number is not None:
+        conflicting = Operation.objects.filter(
+            product=op.product,
+            op_number=new_op_number,
+            organization_id=ctx.organization.id,
+            deleted_at__isnull=True,
+        ).exclude(id=op.id).first()
+        if conflicting:
+            old_op_number = Operation.objects.filter(
+                id=op.id
+            ).values_list('op_number', flat=True).first()
+            try:
+                with transaction.atomic():
+                    # Move conflicting to a temp value to avoid constraint violation
+                    Operation.objects.filter(id=conflicting.id).update(op_number=-1)
+                    op.save()
+                    Operation.objects.filter(id=conflicting.id).update(op_number=old_op_number)
+            except IntegrityError as e:
+                return JsonResponse(
+                    {"error": "integrity_error", "detail": str(e)},
+                    status=400,
+                )
+            return JsonResponse({"swapped_with": str(conflicting.id)})
+
     try:
         op.save()
-    except IntegrityError:
-        # Enforce unique_operation_per_product gracefully:
-        # if another row already uses (product, op_number), surface a clear 400 error.
-        existing = Operation.objects.filter(
-            product=op.product,
-            op_number=op.op_number,
-        ).exclude(id=op.id).first()
-        if existing:
-            return JsonResponse(
-                {
-                    "error": "duplicate_op_number",
-                    "detail": "Another operation already uses this Op # for this product.",
-                    "existing_id": str(existing.id),
-                },
-                status=400,
-            )
-        raise
+    except IntegrityError as e:
+        return JsonResponse(
+            {"error": "integrity_error", "detail": str(e)},
+            status=400,
+        )
 
     return JsonResponse({})
 
@@ -224,11 +271,13 @@ def model_operations_update(request, model_id, op_id):
 @csrf_exempt
 @require_http_methods(['DELETE'])
 def model_operations_delete(request, model_id, op_id):
-    get_object_or_404(RMCMModel, id=model_id)
-    try:
-        op = Operation.objects.get(id=op_id)
-    except Operation.DoesNotExist:
-        return JsonResponse({}, status=204)
+    ctx, err = get_org_context(request)
+    if err:
+        return err
+    m = get_object_or_404(RMCMModel, id=model_id, organization_id=ctx.organization.id)
+    op = Operation.objects.filter(id=op_id, product__model=m).first()
+    if op is None:
+        return JsonResponse({"success": True}, status=200)
 
     from django.utils import timezone
 
@@ -238,4 +287,4 @@ def model_operations_delete(request, model_id, op_id):
 
     Routing.objects.filter(from_operation=op, deleted_at__isnull=True).update(deleted_at=now)
 
-    return JsonResponse({}, status=204)
+    return JsonResponse({"success": True}, status=200)

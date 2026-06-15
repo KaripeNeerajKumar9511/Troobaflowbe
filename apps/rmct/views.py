@@ -22,6 +22,7 @@ from apps.ibom.models import BOM
 
 from .models import RMCMModel, ModelVersion, Scenario, ScenarioChange, ScenarioResult
 from .snapshot_restore import SnapshotScopeError, apply_snapshot_to_model
+from apps.organizations.scoping import get_org_context
 
 PRE_RESTORE_LABEL = "Previous state (auto-saved)"
 
@@ -40,19 +41,32 @@ def _require_authenticated(request):
 
 
 def _owned_models_qs(request):
-    return RMCMModel.objects.filter(owner=request.user)
+    ctx, err = get_org_context(request)
+    if err:
+        # callers must handle None
+        return RMCMModel.objects.none()
+    return RMCMModel.objects.filter(organization_id=ctx.organization.id)
 
 
 def _owned_model_or_404(request, model_id):
-    return get_object_or_404(_owned_models_qs(request), id=model_id)
+    ctx, err = get_org_context(request)
+    if err:
+        raise RMCMModel.DoesNotExist()
+    return get_object_or_404(RMCMModel.objects.filter(organization_id=ctx.organization.id), id=model_id)
 
 
 def _owned_scenario_or_404(request, scenario_id):
-    return get_object_or_404(Scenario.objects.filter(model__owner=request.user), id=scenario_id)
+    ctx, err = get_org_context(request)
+    if err:
+        raise Scenario.DoesNotExist()
+    return get_object_or_404(Scenario.objects.filter(model__organization_id=ctx.organization.id), id=scenario_id)
 
 
 def _owned_version_or_404(request, version_id):
-    return get_object_or_404(ModelVersion.objects.filter(model__owner=request.user), id=version_id)
+    ctx, err = get_org_context(request)
+    if err:
+        raise ModelVersion.DoesNotExist()
+    return get_object_or_404(ModelVersion.objects.filter(model__organization_id=ctx.organization.id), id=version_id)
 
 
 def _serialize_general(m: RMCMModel) -> dict:
@@ -85,6 +99,7 @@ def _serialize_general(m: RMCMModel) -> dict:
         'gen2': gd.gen2,
         'gen3': gd.gen3,
         'gen4': gd.gen4,
+        'output_view_mode': gd.output_view_mode or 'normal',
     }
 
 
@@ -116,11 +131,15 @@ def _update_general(m: RMCMModel, data: dict) -> None:
         "gen2": "gen2",
         "gen3": "gen3",
         "gen4": "gen4",
+        "output_view_mode": "output_view_mode",
     }
 
     for payload_key, field_name in mappings.items():
         if payload_key in data:
-            setattr(gd, field_name, data[payload_key])
+            value = data[payload_key]
+            if payload_key == "output_view_mode" and value not in ("normal", "premium"):
+                continue
+            setattr(gd, field_name, value)
 
     gd.save()
 
@@ -234,6 +253,8 @@ def _operations_for_model(m: RMCMModel):
     """
     Build Operation[] payload for a model from the dedicated operations table.
     """
+    from apps.operations.normalize import normalize_operations_payload
+
     ops_qs = Operation.objects.filter(
         product__model=m,
         deleted_at__isnull=True,
@@ -265,7 +286,7 @@ def _operations_for_model(m: RMCMModel):
             'oper3': op.oper3,
             'oper4': op.oper4,
         })
-    return payload
+    return normalize_operations_payload(payload)
 
 
 def _routing_for_model(m: RMCMModel):
@@ -433,10 +454,15 @@ def model_save(request, model_id=None):
         defaults['param_names'] = data['param_names']
     if isinstance(data.get('dept_codes'), dict):
         defaults['dept_codes'] = data['dept_codes']
+    ctx, err = get_org_context(request)
+    if err:
+        return err
+
     existing = RMCMModel.objects.filter(id=uid).first()
-    if existing and existing.owner_id != request.user.id:
+    if existing and existing.organization_id != ctx.organization.id:
         return JsonResponse({'error': 'Model not found'}, status=404)
     defaults['owner'] = request.user
+    defaults['organization'] = ctx.organization
     if existing:
         for key, value in defaults.items():
             setattr(existing, key, value)
@@ -481,7 +507,7 @@ def model_delete(request, model_id):
     m = _owned_models_qs(request).filter(id=model_id).first()
     if m:
         m.delete()
-    return JsonResponse({}, status=204)
+    return JsonResponse({"success": True}, status=200)
 
 
 # ─── Param names ────────────────────────────────────────────────────────
@@ -772,7 +798,10 @@ def version_delete(request, version_id):
     auth_err = _require_authenticated(request)
     if auth_err:
         return auth_err
-    v = ModelVersion.objects.filter(id=version_id, model__owner=request.user).first()
+    ctx, err = get_org_context(request)
+    if err:
+        return err
+    v = ModelVersion.objects.filter(id=version_id, model__organization_id=ctx.organization.id).first()
     if v:
         v.delete()
     return JsonResponse({}, status=204)
@@ -966,7 +995,10 @@ def scenario_delete(request, scenario_id):
     auth_err = _require_authenticated(request)
     if auth_err:
         return auth_err
-    s = Scenario.objects.filter(id=scenario_id, model__owner=request.user).first()
+    ctx, err = get_org_context(request)
+    if err:
+        return err
+    s = Scenario.objects.filter(id=scenario_id, model__organization_id=ctx.organization.id).first()
     if s:
         s.delete()
     return JsonResponse({}, status=204)
@@ -1014,7 +1046,14 @@ def scenario_remove_change(request, scenario_id, change_id):
     auth_err = _require_authenticated(request)
     if auth_err:
         return auth_err
-    ScenarioChange.objects.filter(scenario_id=scenario_id, id=change_id, scenario__model__owner=request.user).delete()
+    ctx, err = get_org_context(request)
+    if err:
+        return err
+    ScenarioChange.objects.filter(
+        scenario_id=scenario_id,
+        id=change_id,
+        scenario__model__organization_id=ctx.organization.id,
+    ).delete()
     return JsonResponse({}, status=204)
 
 

@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Join {{ organization_name }} on Trooba Flow</title>
+  </head>
+  <body style="margin:0;padding:0;background:#eef1f5;font-family:Arial,Helvetica,sans-serif;color:#0C0F14;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#eef1f5;padding:32px 16px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:560px;background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;overflow:hidden;">
+            <!-- Header -->
+            <tr>
+              <td style="background:#0C0F14;padding:28px 28px 24px;">
+                {% if logo_cid %}
+                <img
+                  src="cid:{{ logo_cid }}"
+                  alt="Trooba Flow"
+                  width="200"
+                  height="47"
+                  style="display:block;margin:0 0 16px 0;border:0;max-width:200px;height:auto;"
+                />
+                {% else %}
+                <div style="font-size:11px;letter-spacing:0.18em;text-transform:uppercase;color:#00C4B4;font-weight:700;margin-bottom:8px;">
+                  Trooba Flow
+                </div>
+                {% endif %}
+                <div style="font-size:22px;font-weight:700;color:#ffffff;line-height:1.25;">
+                  You're invited
+                </div>
+                <div style="font-size:14px;color:#E8EDF2;margin-top:6px;opacity:0.9;">
+                  Join your team on the manufacturing cycle time platform
+                </div>
+              </td>
+            </tr>
+
+            <!-- Body -->
+            <tr>
+              <td style="padding:28px;">
+                <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#0C0F14;">
+                  <strong>{{ inviter_name }}</strong> invited you to join
+                  <strong>{{ organization_name }}</strong> on Trooba Flow.
+                </p>
+
+                <!-- Details box -->
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;margin:0 0 20px;">
+                  <tr>
+                    <td style="padding:16px 18px;">
+                      <div style="font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#7B90A5;margin-bottom:10px;">
+                        Invitation details
+                      </div>
+                      <div style="font-size:14px;line-height:1.7;color:#0C0F14;">
+                        <div><span style="color:#6b7280;">Organization:</span> <strong>{{ organization_name }}</strong></div>
+                        <div><span style="color:#6b7280;">Your email:</span> <strong>{{ invitee_email }}</strong></div>
+                        <div><span style="color:#6b7280;">Invited by:</span> <strong>{{ inviter_name }}</strong></div>
+                        <div><span style="color:#6b7280;">Expires:</span> <strong>{{ expires_hours }} hours</strong></div>
+                      </div>
+                    </td>
+                  </tr>
+                </table>
+
+                <!-- Steps -->
+                <div style="font-size:13px;font-weight:700;color:#0C0F14;margin-bottom:10px;">What happens next</div>
+                <ol style="margin:0 0 22px;padding-left:20px;font-size:14px;line-height:1.65;color:#374151;">
+                  <li style="margin-bottom:6px;">Click the button below to open the secure setup page.</li>
+                  <li>Create your password (minimum 8 characters) and you'll be taken straight to Trooba Flow.</li>
+                </ol>
+
+                <!-- CTA -->
+                <table role="presentation" cellspacing="0" cellpadding="0" style="margin:0 0 20px;">
+                  <tr>
+                    <td style="border-radius:10px;background:#00C4B4;">
+                      <a href="{{ invite_url }}" style="display:inline-block;padding:13px 22px;font-size:15px;font-weight:700;color:#0C0F14;text-decoration:none;border-radius:10px;">
+                        Set up your account
+                      </a>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+
+            <!-- Footer -->
+            <tr>
+              <td style="padding:16px 28px 22px;border-top:1px solid #eef1f5;background:#fafbfc;">
+                <p style="margin:0;font-size:12px;line-height:1.5;color:#9ca3af;">
+                  If you weren't expecting this invitation, you can safely ignore this email.
+                </p>
+                <p style="margin:10px 0 0;font-size:11px;color:#b0b8c4;">
+                  © Trooba Flow · Flow Intelligence
+                </p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

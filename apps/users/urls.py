@@ -22,5 +22,7 @@ urlpatterns = [
     path("api/profile/patch/", views.profile_patch),
     path("api/profile/password/", views.change_password),
     path("api/profile/org-members/", views.org_members),
+    path("api/profile/organizations/", views.my_organizations),
+    path("api/profile/organizations/active/", views.set_active_organization),
     path("api/logout/", views.logout_view),
 ]

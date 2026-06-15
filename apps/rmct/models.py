@@ -4,6 +4,7 @@ All nested data (general, labor, equipment, products, operations, routing, ibom,
 """
 from django.db import models
 from django.contrib.auth.models import User
+from apps.organizations.models import Organization
 
 
 class RMCMModel(models.Model):
@@ -12,6 +13,14 @@ class RMCMModel(models.Model):
     """
     id = models.UUIDField(primary_key=True, editable=False)
     owner = models.ForeignKey(User, on_delete=models.CASCADE, null=True, blank=True, related_name='rmct_models')
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        db_index=True,
+        related_name="rmct_models",
+    )
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True)
     tags = models.JSONField(default=list)  # list of strings

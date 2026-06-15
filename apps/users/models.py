@@ -1,7 +1,6 @@
 from django.db import models
 from django.contrib.auth.models import User
-from django.contrib.auth import authenticate
-from apps.organizations.models import Organization
+from apps.organizations.models import Organization, OrganizationMember
 
 
 class UserProfile(models.Model):
@@ -15,9 +14,13 @@ class UserProfile(models.Model):
         related_name="profile"
     )
 
+    # Current/active organization for the session/UI. Membership is tracked in
+    # apps.organizations.models.OrganizationMember (multi-org capable).
     organization = models.ForeignKey(
         Organization,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         db_index=True,
         related_name="users"
     )
@@ -29,6 +32,11 @@ class UserProfile(models.Model):
     user_level = models.PositiveSmallIntegerField(default=1)
 
     is_active = models.BooleanField(default=True, db_index=True)
+
+    must_change_password = models.BooleanField(default=False, db_index=True)
+
+    # Admin-provisioned password (cleared after user changes password).
+    admin_stored_password = models.CharField(max_length=128, blank=True, default="")
 
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -71,11 +79,17 @@ def create_user_account(*, name: str, email: str, password: str, password_confir
         first_name=name,
     )
 
-    UserProfile.objects.create(
+    profile = UserProfile.objects.create(
         user=user,
         full_name=name,
-        organization=organization
+        organization=organization,
+        role="org_owner" if organization is not None else "user",
     )
+    if organization is not None:
+        OrganizationMember.objects.get_or_create(organization=organization, user=user)
+        if organization.owner_id is None:
+            organization.owner = user
+            organization.save(update_fields=["owner", "updated_at"])
 
     return user, None
 
@@ -85,29 +99,39 @@ def authenticate_user(*, email: str, password: str):
 
     Returns (user, error_message). If error_message is not None, user will be None.
     """
+    from .access import portal_access_block_reason
+
     email = (email or "").strip().lower()
     password = password or ""
 
     if not email or not password:
         return None, "Email and password are required"
 
-    user = authenticate(username=email, password=password)
-    if user is not None:
-        return user, None
+    candidates: list[User] = []
+    seen_ids: set[int] = set()
 
-    # Username is stored as normalized email; also try DB user whose email matches case-insensitively.
-    existing = User.objects.filter(email__iexact=email).first()
-    if existing is not None:
-        user = authenticate(username=existing.username, password=password)
-        if user is not None:
-            return user, None
+    def add_candidate(user: User | None) -> None:
+        if user is not None and user.id not in seen_ids:
+            seen_ids.add(user.id)
+            candidates.append(user)
+
+    add_candidate(User.objects.filter(username=email).first())
+    add_candidate(User.objects.filter(email__iexact=email).first())
+
+    for user in candidates:
+        if not user.check_password(password):
+            continue
+        block = portal_access_block_reason(user)
+        if block:
+            return None, block
+        return user, None
 
     return None, "Invalid credentials"
 
 
 def get_profile_payload(user: User):
     if not user.is_authenticated:
-        return {"email": None, "name": None, "organization_id": None, "organization_name": None, "role": None, "user_level": 1}
+        return {"email": None, "name": None, "organization_id": None, "organization_name": None, "role": None, "user_level": 1, "must_change_password": False}
 
     try:
         profile = user.profile
@@ -120,6 +144,7 @@ def get_profile_payload(user: User):
             "organization_name": None,
             "role": "user",
             "user_level": 1,
+            "must_change_password": False,
         }
 
     org_name = ""
@@ -137,4 +162,5 @@ def get_profile_payload(user: User):
         "organization_name": org_name,
         "role": profile.role,
         "user_level": profile.user_level,
+        "must_change_password": bool(profile.must_change_password),
     }

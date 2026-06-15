@@ -9,6 +9,8 @@ from apps.rmct.models import RMCMModel
 from apps.labor.models import Labor
 
 from .models import EquipmentGroup
+from apps.organizations.scoping import get_org_context
+from apps.organizations.nested_rows import revive_soft_deleted, sync_row_organization
 
 
 def _parse_json(request):
@@ -18,19 +20,27 @@ def _parse_json(request):
         return None
 
 
+def _resolve_equipment(model: RMCMModel, equip_id: str, org):
+    eq = EquipmentGroup.objects.filter(id=equip_id, model=model).first()
+    if eq is None:
+        return None
+    sync_row_organization(eq, org)
+    revive_soft_deleted(eq)
+    return eq
+
+
 @csrf_exempt
 @require_http_methods(['POST'])
 def model_equipment_create(request, model_id):
-    m = get_object_or_404(RMCMModel, id=model_id)
+    ctx, err = get_org_context(request)
+    if err:
+        return err
+    m = get_object_or_404(RMCMModel, id=model_id, organization_id=ctx.organization.id)
     data = _parse_json(request)
     if data is None:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
 
-    owner = m.owner
-    if owner is None or not hasattr(owner, "profile") or not getattr(owner.profile, "organization_id", None):
-        return JsonResponse({'error': 'Owner organization not configured for model'}, status=400)
-
-    org = owner.profile.organization
+    org = ctx.organization
 
     equip_id = data.get('id')
     equip_kwargs = {
@@ -117,12 +127,17 @@ def model_equipment_create(request, model_id):
 @csrf_exempt
 @require_http_methods(['PATCH'])
 def model_equipment_update(request, model_id, equip_id):
-    m = get_object_or_404(RMCMModel, id=model_id)
+    ctx, err = get_org_context(request)
+    if err:
+        return err
+    m = get_object_or_404(RMCMModel, id=model_id, organization_id=ctx.organization.id)
     data = _parse_json(request)
     if data is None:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
 
-    eq = get_object_or_404(EquipmentGroup, id=equip_id, model=m)
+    eq = _resolve_equipment(m, equip_id, ctx.organization)
+    if eq is None:
+        return JsonResponse({'error': 'Equipment not found for this model'}, status=404)
 
     if 'name' in data:
         eq.name = data['name']
@@ -172,15 +187,18 @@ def model_equipment_update(request, model_id, equip_id):
 @csrf_exempt
 @require_http_methods(['DELETE'])
 def model_equipment_delete(request, model_id, equip_id):
-    m = get_object_or_404(RMCMModel, id=model_id)
-    try:
-        eq = EquipmentGroup.objects.get(id=equip_id, model=m)
-    except EquipmentGroup.DoesNotExist:
-        return JsonResponse({}, status=204)
+    print('model_equipment_delete', model_id, equip_id)
+    ctx, err = get_org_context(request)
+    if err:
+        return err
+    m = get_object_or_404(RMCMModel, id=model_id, organization_id=ctx.organization.id)
+    eq = _resolve_equipment(m, equip_id, ctx.organization)
+    if eq is None:
+        return JsonResponse({"success": True}, status=200)
 
     from django.utils import timezone
 
     eq.deleted_at = timezone.now()
     eq.save()
 
-    return JsonResponse({}, status=204)
+    return JsonResponse({"success": True}, status=200)

@@ -106,10 +106,14 @@ def _restore_general(m: RMCMModel, general: dict) -> None:
         "gen2": "gen2",
         "gen3": "gen3",
         "gen4": "gen4",
+        "output_view_mode": "output_view_mode",
     }
     for payload_key, field_name in mappings.items():
         if payload_key in general:
-            setattr(gd, field_name, general[payload_key])
+            value = general[payload_key]
+            if payload_key == "output_view_mode" and value not in ("normal", "premium"):
+                continue
+            setattr(gd, field_name, value)
     gd.save()
 
 

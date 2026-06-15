@@ -11,6 +11,9 @@ from apps.rmct.models import RMCMModel
 from apps.products.models import Product
 from apps.operations.models import Operation
 from .models import Routing
+from .routing_path import apply_routing_cell_update
+from apps.organizations.scoping import get_org_context
+from apps.organizations.nested_rows import revive_soft_deleted, sync_row_organization
 
 
 def _parse_json(request):
@@ -21,14 +24,15 @@ def _parse_json(request):
 
 
 def _get_org_from_model(model):
-    owner = model.owner
-    if owner is None or not hasattr(owner, "profile") or not owner.profile.organization:
-        return None
-    return owner.profile.organization
+    return getattr(model, "organization", None)
 
 
 def _get_or_create_product_from_model(model, product_id):
-    existing = Product.objects.filter(id=product_id, deleted_at__isnull=True).first()
+    existing = Product.objects.filter(
+        id=product_id,
+        organization=model.organization,
+        deleted_at__isnull=True
+    ).first()
     if existing:
         return existing
 
@@ -37,20 +41,55 @@ def _get_or_create_product_from_model(model, product_id):
 
 
 def _get_or_create_operation_from_model(model, product, op_name):
+    from apps.operations.normalize import ROUTING_META_OP_NUMBERS
+
+    org = _get_org_from_model(model)
+    name = str(op_name or "").strip()
+    name_upper = name.upper()
+
+    if name_upper in ROUTING_META_OP_NUMBERS:
+        target_num = ROUTING_META_OP_NUMBERS[name_upper]
+        existing = (
+            Operation.objects.filter(
+                product=product,
+                organization=org,
+                deleted_at__isnull=True,
+                name__iexact=name_upper,
+            )
+            .order_by("op_number")
+            .first()
+        )
+        if existing:
+            if existing.op_number != target_num:
+                existing.op_number = target_num
+                existing.save(update_fields=["op_number"])
+            return existing
+        return Operation.objects.create(
+            organization=org,
+            product=product,
+            name=name_upper,
+            op_number=target_num,
+            percent_assign=100,
+            equipment_setup_per_lot=0,
+            equipment_run_per_piece=0,
+            labor_setup_per_lot=0,
+            labor_run_per_piece=0,
+        )
+
     existing = Operation.objects.filter(
         product=product,
-        name=op_name,
+        name=name,
+        organization=org,
         deleted_at__isnull=True,
     ).first()
 
     if existing:
         return existing
 
-    org = _get_org_from_model(model)
     from django.db.models import Max
 
     max_num = (
-        Operation.objects.filter(product=product)
+        Operation.objects.filter(product=product, organization=org)
         .aggregate(Max("op_number"))
         .get("op_number__max")
         or 0
@@ -59,7 +98,7 @@ def _get_or_create_operation_from_model(model, product, op_name):
     return Operation.objects.create(
         organization=org,
         product=product,
-        name=op_name,
+        name=name,
         op_number=max_num + 10,
         percent_assign=100,
         equipment_setup_per_lot=0,
@@ -72,8 +111,10 @@ def _get_or_create_operation_from_model(model, product, op_name):
 @csrf_exempt
 @require_http_methods(["POST"])
 def model_routing_create(request, model_id):
-
-    m = get_object_or_404(RMCMModel, id=model_id)
+    ctx, err = get_org_context(request)
+    if err:
+        return err
+    m = get_object_or_404(RMCMModel, id=model_id, organization_id=ctx.organization.id)
 
     data = _parse_json(request)
     if data is None:
@@ -141,8 +182,10 @@ def model_routing_create(request, model_id):
 @require_http_methods(["PUT"])
 @transaction.atomic
 def model_routing_set(request, model_id):
-
-    m = get_object_or_404(RMCMModel, id=model_id)
+    ctx, err = get_org_context(request)
+    if err:
+        return err
+    m = get_object_or_404(RMCMModel, id=model_id, organization_id=ctx.organization.id)
 
     data = _parse_json(request)
     if data is None:
@@ -216,74 +259,83 @@ def model_routing_set(request, model_id):
                 probability=pct_routed,
             )
 
+    from apps.operations.normalize import dedupe_routing_meta_operations_for_product
+
+    dedupe_routing_meta_operations_for_product(product)
+
+    m.updated_at = timezone.now()
+    m.save(update_fields=["updated_at"])
+
     return JsonResponse({})
 
 
 @csrf_exempt
 @require_http_methods(["PATCH"])
+@transaction.atomic
 def model_routing_update(request, model_id, route_id):
-
-    m = get_object_or_404(RMCMModel, id=model_id)
-    org = _get_org_from_model(m)
+    ctx, err = get_org_context(request)
+    if err:
+        return err
+    m = get_object_or_404(RMCMModel, id=model_id, organization_id=ctx.organization.id)
+    org = ctx.organization
 
     data = _parse_json(request)
     if data is None:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
 
-    routing = get_object_or_404(
-        Routing,
+    routing = Routing.objects.filter(
         id=route_id,
-        organization=org,
-    )
+        product__model=m,
+        deleted_at__isnull=True,
+    ).first()
+    if routing is None:
+        return JsonResponse({"error": "Routing not found for this model"}, status=404)
+    sync_row_organization(routing, org)
 
-    # Update probability (% routed)
+    pct = None
     if "pct_routed" in data:
-
         pct = data["pct_routed"]
-
         if pct < 0 or pct > 100:
             return JsonResponse(
                 {"error": "pct_routed must be 0-100"}, status=400
             )
 
-        routing.probability = pct
-
-    # Allow changing the destination operation for a route
+    to_op = None
     if "to_op_name" in data:
         try:
-            product = routing.product
             to_op = _get_or_create_operation_from_model(
-                m, product, data.get("to_op_name")
+                m, routing.product, data.get("to_op_name")
             )
         except Operation.DoesNotExist as exc:
             return JsonResponse({"error": str(exc)}, status=400)
 
-        routing.to_operation = to_op
+    routing, merged = apply_routing_cell_update(
+        routing,
+        probability=pct,
+        to_operation=to_op,
+    )
 
-    # Ensure a previously soft-deleted route is restored when updated.
-    routing.deleted_at = None
-    routing.save()
-
-    return JsonResponse({})
+    return JsonResponse({"id": str(routing.id), "merged": merged})
 
 
 @csrf_exempt
 @require_http_methods(["DELETE"])
 def model_routing_delete(request, model_id, route_id):
-
-    m = get_object_or_404(RMCMModel, id=model_id)
-    org = _get_org_from_model(m)
+    ctx, err = get_org_context(request)
+    if err:
+        return err
+    m = get_object_or_404(RMCMModel, id=model_id, organization_id=ctx.organization.id)
 
     routing = Routing.objects.filter(
         id=route_id,
-        organization=org,
+        product__model=m,
         deleted_at__isnull=True,
     ).first()
 
     if not routing:
-        return JsonResponse({}, status=204)
+        return JsonResponse({"success": True}, status=200)
 
     routing.deleted_at = timezone.now()
     routing.save()
 
-    return JsonResponse({}, status=204)
+    return JsonResponse({"success": True}, status=200)

@@ -29,6 +29,11 @@ class ApiAuthMiddleware:
                 "/api/login/",
                 "/api/signup/",
                 "/api/csrf/",
+                # Public org invitation acceptance (new user may not be logged in yet)
+                "/api/organizations/invites/accept/",
+                "/api/organizations/invites/accept",
+                "/api/organizations/invites/preview/",
+                "/api/organizations/invites/preview",
             ]
 
             if request.path not in public_paths:
@@ -37,5 +42,23 @@ class ApiAuthMiddleware:
                         {"error": "Unauthorized"},
                         status=401
                     )
+                from apps.users.access import portal_access_block_reason
+                block = portal_access_block_reason(request.user)
+                if block:
+                    return JsonResponse(
+                        {"error": block, "code": "account_frozen"},
+                        status=403,
+                    )
+                # Force password change on first login (org owners/admin-created users).
+                if request.path != "/api/profile/password/":
+                    try:
+                        profile = request.user.profile
+                        if getattr(profile, "must_change_password", False):
+                            return JsonResponse(
+                                {"error": "Password change required", "code": "must_change_password"},
+                                status=403
+                            )
+                    except Exception:
+                        pass
 
         return self.get_response(request)

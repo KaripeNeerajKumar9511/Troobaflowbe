@@ -4,6 +4,7 @@ from apps.organizations.models import Organization
 from apps.products.models import Product
 from apps.equipment.models import EquipmentGroup
 from apps.labor.models import Labor
+from django.db.models import Q
 
 
 class Operation(models.Model):
@@ -99,6 +100,7 @@ class Operation(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=["product", "op_number"],
+                condition=Q(deleted_at__isnull=True),  # Only enforce for non-deleted rows
                 name="unique_operation_per_product"
             )
         ]

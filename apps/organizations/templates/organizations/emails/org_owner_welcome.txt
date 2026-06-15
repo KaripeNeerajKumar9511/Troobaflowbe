@@ -1,0 +1,16 @@
+Welcome to Trooba Flow, {{ owner_name }}!
+=========================================
+
+Your organization "{{ organization_name }}" is ready.
+
+Sign-in credentials
+-------------------
+Email:               {{ recipient_email }}
+Temporary password:  {{ temporary_password }}
+
+Sign in here:
+{{ login_url }}
+
+You'll be asked to change your password after your first sign-in.
+
+If you didn't expect this email, you can ignore it.

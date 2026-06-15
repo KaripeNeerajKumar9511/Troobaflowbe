@@ -75,6 +75,16 @@ class GeneralData(models.Model):
     gen3 = models.FloatField(default=0.0)
     gen4 = models.FloatField(default=0.0)
 
+    OUTPUT_VIEW_MODE_CHOICES = [
+        ("normal", "Normal"),
+        ("premium", "Premium"),
+    ]
+    output_view_mode = models.CharField(
+        max_length=16,
+        choices=OUTPUT_VIEW_MODE_CHOICES,
+        default="normal",
+    )
+
     class Meta:
         db_table = "general_data"
         verbose_name = "General data"

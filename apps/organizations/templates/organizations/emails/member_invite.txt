@@ -1,0 +1,21 @@
+You're invited to join {{ organization_name }} on Trooba Flow
+============================================================
+
+{{ inviter_name }} invited you to collaborate on Trooba Flow.
+
+Invitation details
+------------------
+Organization: {{ organization_name }}
+Your email:   {{ invitee_email }}
+Invited by:   {{ inviter_name }}
+Expires in:   {{ expires_hours }} hours
+
+What happens next
+-----------------
+1. Open the link below and create your password (min. 8 characters).
+2. You'll go straight to Trooba Flow — no extra sign-in step.
+
+Set up your account:
+{{ invite_url }}
+
+If you weren't expecting this invitation, you can ignore this email.

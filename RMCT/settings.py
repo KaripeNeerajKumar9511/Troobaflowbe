@@ -11,103 +11,183 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
 from pathlib import Path
+import os
+
+from corsheaders.defaults import default_headers
+
+from RMCT.load_env import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Load backend/.env (KEY=value format). Existing process env vars win.
+load_dotenv()
+
+
+def _env_bool(name: str, default: str = "0") -> bool:
+    return os.getenv(name, default).strip().lower() in ("1", "true", "yes")
+
+
+def _env_list(name: str, default: str) -> list[str]:
+    raw = os.getenv(name, default)
+    return [item.strip() for item in raw.split(",") if item.strip()]
 
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/4.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-c@f^1hu-whjoo+5ls%f#s5rmm4y1gkov0@1@=^g#nuk%a5ea=_'
+SECRET_KEY = os.getenv(
+    "SECRET_KEY",
+    "django-insecure-c@f^1hu-whjoo+5ls%f#s5rmm4y1gkov0@1@=^g#nuk%a5ea=_",
+)
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+# GCP/live: set DEBUG=0 in backend/.env on the server.
+DEBUG = _env_bool("DEBUG", "True")
 
-ALLOWED_HOSTS = ["localhost", "127.0.0.1", "victus"]
+# Production HTTPS only: set LIVE_SITE=1 in server .env (cross-subdomain session cookies).
+# Local dev: keep LIVE_SITE=0 even when DEBUG=0, or session cookies will not stick on http://127.0.0.1.
+LIVE_SITE = _env_bool("LIVE_SITE", "0")
+
+ALLOWED_HOSTS = _env_list(
+    "ALLOWED_HOSTS",
+    "localhost,127.0.0.1,victus,34.14.184.16,gotrooba.ai,www.gotrooba.ai,app.gotrooba.ai",
+)
 
 
 # Application definition
 
 INSTALLED_APPS = [
-    'django.contrib.admin',
-    'django.contrib.auth',
-    'django.contrib.contenttypes',
-    'django.contrib.sessions',
-    'django.contrib.messages',
-    'django.contrib.staticfiles',
-    'apps.accounts',
-    'apps.tenants',
-    'apps.factories',
-    'apps.manufacturing',
-    'apps.simulations',
-    'apps.analytics',
-    'apps.users',
-    'apps.rmct',
-    'corsheaders',
-    'rest_framework',
-    'apps.organizations',
-    'apps.labor',
-    'apps.products', 
-    'apps.routing',
-    'apps.operations',
-    'apps.equipment',
-    'apps.auth',
-    'apps.ibom',
-    'apps.generaldata',
-    'apps.admin.apps.TfAdminConfig',
+    "django.contrib.admin",
+    "django.contrib.auth",
+    "django.contrib.contenttypes",
+    "django.contrib.sessions",
+    "django.contrib.messages",
+    "django.contrib.staticfiles",
+    "channels",
+    "apps.accounts",
+    "apps.tenants",
+    "apps.factories",
+    "apps.manufacturing",
+    "apps.simulations",
+    "apps.analytics",
+    "apps.users",
+    "apps.rmct",
+    "corsheaders",
+    "rest_framework",
+    "apps.organizations",
+    "apps.labor",
+    "apps.products",
+    "apps.routing",
+    "apps.operations",
+    "apps.equipment",
+    "apps.auth",
+    "apps.ibom",
+    "apps.generaldata",
+    "apps.admin.apps.TfAdminConfig",
 ]
 
 # TF Admin portal (override via environment in production)
-TF_ADMIN_EMAIL = 'admin@gmail.com'
-TF_ADMIN_PASSWORD = '12345678'
+TF_ADMIN_EMAIL = os.getenv("TF_ADMIN_EMAIL", "admin@gmail.com")
+TF_ADMIN_PASSWORD = os.getenv("TF_ADMIN_PASSWORD", "12345678")
 
 MIDDLEWARE = [
-    'django.middleware.security.SecurityMiddleware',
-    'django.contrib.sessions.middleware.SessionMiddleware',
-    'django.middleware.common.CommonMiddleware',
-    'django.middleware.csrf.CsrfViewMiddleware',
-    'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'django.contrib.messages.middleware.MessageMiddleware',
-    'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    'corsheaders.middleware.CorsMiddleware',
-    'apps.auth.middleware.api_auth.ApiAuthMiddleware',
+    # CorsMiddleware must be first (production requirement for browser API calls).
+    "corsheaders.middleware.CorsMiddleware",
+    "django.middleware.security.SecurityMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
+    "django.middleware.common.CommonMiddleware",
+    "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django.contrib.messages.middleware.MessageMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "apps.auth.middleware.api_auth.ApiAuthMiddleware",
 ]
 
-ROOT_URLCONF = 'RMCT.urls'
+ROOT_URLCONF = "RMCT.urls"
+
+# Email — honor explicit EMAIL_BACKEND / SMTP creds even when DEBUG=1 on a server.
+_explicit_email_backend = os.getenv("EMAIL_BACKEND", "").strip()
+if _explicit_email_backend:
+    EMAIL_BACKEND = _explicit_email_backend
+elif os.getenv("EMAIL_HOST_USER", "").strip():
+    EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+else:
+    EMAIL_BACKEND = (
+        "django.core.mail.backends.console.EmailBackend"
+        if DEBUG
+        else "django.core.mail.backends.smtp.EmailBackend"
+    )
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "no-reply@trooba.local")
+EMAIL_HOST = os.getenv("EMAIL_HOST", "localhost")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = _env_bool("EMAIL_USE_TLS", "true")
+EMAIL_USE_SSL = _env_bool("EMAIL_USE_SSL", "false")
+EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "30"))
+
+# Public frontend origin for invite emails (e.g. https://app.gotrooba.ai). Overrides browser origin.
+PUBLIC_APP_URL = os.getenv("PUBLIC_APP_URL", "").strip().rstrip("/")
 
 TEMPLATES = [
     {
-        'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
-        'APP_DIRS': True,
-        'OPTIONS': {
-            'context_processors': [
-                'django.template.context_processors.debug',
-                'django.template.context_processors.request',
-                'django.contrib.auth.context_processors.auth',
-                'django.contrib.messages.context_processors.messages',
+        "BACKEND": "django.template.backends.django.DjangoTemplates",
+        "DIRS": [],
+        "APP_DIRS": True,
+        "OPTIONS": {
+            "context_processors": [
+                "django.template.context_processors.debug",
+                "django.template.context_processors.request",
+                "django.contrib.auth.context_processors.auth",
+                "django.contrib.messages.context_processors.messages",
             ],
         },
     },
 ]
 
-WSGI_APPLICATION = 'RMCT.wsgi.application'
+WSGI_APPLICATION = "RMCT.wsgi.application"
+ASGI_APPLICATION = "RMCT.asgi.application"
+
+# Redis used for: Channels pub/sub, presence, locks.
+REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
+
+# Default in-memory in DEBUG so realtime works without a local Redis install (Windows dev).
+_inmem_env = os.getenv("USE_INMEMORY_CHANNEL_LAYER", "").strip().lower()
+if _inmem_env in ("1", "true", "yes"):
+    USE_INMEMORY_CHANNEL_LAYER = True
+elif _inmem_env in ("0", "false", "no"):
+    USE_INMEMORY_CHANNEL_LAYER = False
+else:
+    USE_INMEMORY_CHANNEL_LAYER = DEBUG
+
+if USE_INMEMORY_CHANNEL_LAYER:
+    CHANNEL_LAYERS = {"default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}}
+else:
+    from RMCT.redis_config import channels_redis_hosts
+
+    CHANNEL_LAYERS = {
+        "default": {
+            "BACKEND": "channels_redis.core.RedisChannelLayer",
+            "CONFIG": {
+                "hosts": channels_redis_hosts(),
+                "capacity": 1500,
+                "expiry": 60,
+            },
+        }
+    }
 
 
-# Database
-# https://docs.djangoproject.com/en/4.2/ref/settings/#databases
-
+# Database — override via backend/.env on each environment (never commit real passwords).
 DATABASES = {
- 'default': {
-   'ENGINE': 'django.db.backends.postgresql',
-   'NAME': 'RMCT',
-   'USER': 'postgres',
-   'PASSWORD': 'Neer@j9511',
-   'HOST': 'localhost',
-   'PORT': '5432',
- }
+    "default": {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": os.getenv("DB_NAME", "RMCT"),
+        "USER": os.getenv("DB_USER", "postgres"),
+        "PASSWORD": os.getenv("DB_PASSWORD", "Neer@j9511"),
+        "HOST": os.getenv("DB_HOST", "localhost"),
+        "PORT": os.getenv("DB_PORT", "5432"),
+    }
 }
 
 
@@ -116,16 +196,16 @@ DATABASES = {
 
 AUTH_PASSWORD_VALIDATORS = [
     {
-        'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
+        "NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator",
     },
     {
-        'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
+        "NAME": "django.contrib.auth.password_validation.MinimumLengthValidator",
     },
     {
-        'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',
+        "NAME": "django.contrib.auth.password_validation.CommonPasswordValidator",
     },
     {
-        'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
+        "NAME": "django.contrib.auth.password_validation.NumericPasswordValidator",
     },
 ]
 
@@ -133,9 +213,9 @@ AUTH_PASSWORD_VALIDATORS = [
 # Internationalization
 # https://docs.djangoproject.com/en/4.2/topics/i18n/
 
-LANGUAGE_CODE = 'en-us'
+LANGUAGE_CODE = "en-us"
 
-TIME_ZONE = 'UTC'
+TIME_ZONE = "UTC"
 
 USE_I18N = True
 
@@ -144,43 +224,63 @@ USE_TZ = True
 
 CORS_ALLOW_CREDENTIALS = True
 
-CORS_ALLOWED_ORIGINS = [
+_default_cors = [
     "http://localhost:3000",
     "http://localhost:8080",
     "http://127.0.0.1:8080",
     "http://127.0.0.1:8000",
     "http://victus:8080",
+    "https://app.trooba.com",
+    "https://gotrooba.ai",
+    "https://www.gotrooba.ai",
+    "https://app.gotrooba.ai",
+]
+_extra_cors = _env_list("CORS_ALLOWED_ORIGINS", "")
+CORS_ALLOWED_ORIGINS = _default_cors + [o for o in _extra_cors if o not in _default_cors]
+
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    "x-csrftoken",
 ]
 
-CSRF_TRUSTED_ORIGINS = [
-    "http://localhost:3000",
-    "http://localhost:8080",
-    "http://127.0.0.1:8080",
-    "http://127.0.0.1:8000",
-    "http://victus:8080",
-]
+_default_csrf = list(CORS_ALLOWED_ORIGINS)
+_extra_csrf = _env_list("CSRF_TRUSTED_ORIGINS", "")
+CSRF_TRUSTED_ORIGINS = _default_csrf + [o for o in _extra_csrf if o not in _default_csrf]
 
-# Session cookie (auth): HttpOnly, sent with every request
+CORS_EXPOSE_HEADERS = ["Set-Cookie"]
+
+# Session / CSRF cookies
 SESSION_ENGINE = "django.contrib.sessions.backends.db"
 SESSION_COOKIE_HTTPONLY = True
-SESSION_COOKIE_SAMESITE = "Lax"
 SESSION_COOKIE_AGE = 1209600  # 2 weeks
-# Production: if frontend is on gotrooba.ai and API on rmctapi.gotrooba.ai,
-# set SESSION_COOKIE_DOMAIN = ".gotrooba.ai" so the cookie is sent to both.
-# SESSION_COOKIE_DOMAIN = ".gotrooba.ai"  # optional, for shared subdomain auth
 
-# CSRF cookie: readable by JS so we can send X-CSRFToken header
 CSRF_COOKIE_HTTPONLY = False
-CSRF_COOKIE_SAMESITE = "Lax"
 CSRF_USE_SESSIONS = False
+
+_cookie_domain = os.getenv("SESSION_COOKIE_DOMAIN", ".gotrooba.ai" if LIVE_SITE else "").strip()
+
+if LIVE_SITE:
+    # Production: HTTPS cross-subdomain auth (app.gotrooba.ai + API host).
+    SESSION_COOKIE_SECURE = True
+    SESSION_COOKIE_SAMESITE = "None"
+    CSRF_COOKIE_SECURE = True
+    CSRF_COOKIE_SAMESITE = "None"
+    if _cookie_domain:
+        SESSION_COOKIE_DOMAIN = _cookie_domain
+        CSRF_COOKIE_DOMAIN = _cookie_domain
+else:
+    # Local dev: plain HTTP on localhost.
+    SESSION_COOKIE_SECURE = False
+    SESSION_COOKIE_SAMESITE = "Lax"
+    CSRF_COOKIE_SECURE = False
+    CSRF_COOKIE_SAMESITE = "Lax"
 
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/4.2/howto/static-files/
 
-STATIC_URL = 'static/'
+STATIC_URL = "static/"
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/4.2/ref/settings/#default-auto-field
 
-DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"

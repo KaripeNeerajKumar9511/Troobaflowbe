@@ -355,11 +355,11 @@ def model_labor_delete(request, model_id, labor_id):
     try:
         labor = Labor.objects.get(id=labor_id, model=m)
     except Labor.DoesNotExist:
-        return JsonResponse({}, status=204)
+        return JsonResponse({"success": True}, status=200)
 
     from django.utils import timezone
 
     labor.deleted_at = timezone.now()
     labor.save()
 
-    return JsonResponse({}, status=204)
+    return JsonResponse({"success": True}, status=200)

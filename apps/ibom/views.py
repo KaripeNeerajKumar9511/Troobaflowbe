@@ -134,11 +134,11 @@ def model_ibom_delete(request, model_id, entry_id):
     try:
         b = BOM.objects.get(id=entry_id)
     except BOM.DoesNotExist:
-        return JsonResponse({}, status=204)
+        return JsonResponse({"success": True}, status=200)
 
     from django.utils import timezone
 
     b.deleted_at = timezone.now()
     b.save()
 
-    return JsonResponse({}, status=204)
+    return JsonResponse({"success": True}, status=200)

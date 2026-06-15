@@ -41,10 +41,14 @@ def _update_general(model: RMCMModel, data: dict) -> None:
         'gen2': 'gen2',
         'gen3': 'gen3',
         'gen4': 'gen4',
+        'output_view_mode': 'output_view_mode',
     }
     for payload_key, model_field in field_map.items():
         if payload_key in data:
-            setattr(gd, model_field, data[payload_key])
+            value = data[payload_key]
+            if payload_key == 'output_view_mode' and value not in ('normal', 'premium'):
+                continue
+            setattr(gd, model_field, value)
     gd.save()
 
 
